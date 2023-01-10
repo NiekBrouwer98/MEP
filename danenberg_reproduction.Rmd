@@ -5,27 +5,52 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+```{r introduction, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-I make some additional notes here.
+Here we aim to reproduce the results of the paper Breast tumor microenvironment structures are associated with genomic features and clinical outcome by Danenberg et al. (https://www.nature.com/articles/s41588-022-01041-y).
+We focus on the description of the spatial organization of the TME as presented in figures 4b,d,f and its prognostic impact as seen in figure 6.
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+The separation and phenotype classification of single cells is not reproduced and this is retrieved from the original paper.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r data}
+library(tidyverse)
+cell_neighbors <- read_csv("/DATA/share/Spatial/toPublicRepository/CellNeighbours.csv")
+images <- unique(cell_neighbors[['ImageNumber']])
 ```
 
-## Including Plots
+## Spatial graphs
+1.	Generate spatial graphs for epithelial and non-epithelial cells per image, exclude perivascular cells.
+```{r spatial graphs}
+library(igraph)
 
-You can also embed plots, for example:
+#Split dataset in tumor and stromal cells
+tumour <- subset(cell_neighbors, (from_is_epithelial == T & to_is_epithelial == T)
+& (from_is_perivascular == F & to_is_perivascular == F))
+stromal <- subset(cell_neighbors, (from_is_epithelial == F & to_is_epithelial == F) 
+	& (from_is_perivascular == F & to_is_perivascular == F))
 
-```{r pressure, echo=FALSE}
-plot(pressure)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Community detection
+2.	Detect communities based on random walks
+
+```{r community detection}
+n_threads <- parallel::detectCores()
+
+
+```
+
+
+## Connectivity profiles
+3.	Define connectivity profiles for all communities as vertex degree per phenotype
+
+## Cluster communities
+4.	Cluster with Ward’s method for hierarchical clustering
+
+## Validation
+5.	Validate reproducibility by training a random forest classifier on connectivity profiles
+
+## Additional properties
+6.	Compute number of vertices, number of edges, diameter, density, transitivity and assortativity and Shannon diversity by cell phenotype.
