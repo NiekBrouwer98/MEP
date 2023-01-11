@@ -149,12 +149,45 @@ rm(list = setdiff(ls(), c('cells', 'cellNeighbours', 'communities', 'NetworkProp
 
 ```{r connectivity profiles}
 
+
+
 ```
 
 ## Cluster communities
 4.	Cluster with Ward’s method for hierarchical clustering
 
 ```{r}
+# Cell count threshold
+minCount <- 20
+
+mkCommunityModules <- function(Communities){
+	measureVars <- grep('Ep|SI', names(Communities), value = T)
+	
+	k <- 10 # n clusters	
+
+	cat('Minimum interactions is:', minCount, '\n')
+	cat('No of clusters is:', k, '\n')
+	
+	Communities <- Communities[TotalInteractions > minCount]
+	Communities[, id := seq_len(.N)]
+
+	getHCGroups <- function(dt, k) {
+		dmat <- dist(dt, method = 'canberra')
+		hc <- hclust(dmat, method = 'ward.D2')
+		order <- hc$order
+		groups <- stats::cutree(hc, k = k)
+		return(list(groups = groups, order = order))
+	}
+	
+	toHC <- as.matrix(Communities[, .SD, .SDcols = c(measureVars, 'id')], rownames = 'id')
+	hcOut <- getHCGroups(toHC, k = k)
+	Groups <- data.table(CommunityModuleID = hcOut$groups, 
+		id = as.integer(names(hcOut$groups)))		
+	Communities <- merge(Communities, Groups, by = 'id')
+	Communities[, id := NULL]
+	return(Communities)
+}
+
 
 ```
 
