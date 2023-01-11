@@ -14,43 +14,154 @@ We focus on the description of the spatial organization of the TME as presented 
 
 The separation and phenotype classification of single cells is not reproduced and this is retrieved from the original paper.
 
-```{r data}
+```{r libraries and settings, echo=FALSE}
 library(tidyverse)
-cell_neighbors <- read_csv("/DATA/share/Spatial/toPublicRepository/CellNeighbours.csv")
-images <- unique(cell_neighbors[['ImageNumber']])
-```
-
-## Spatial graphs
-1.	Generate spatial graphs for epithelial and non-epithelial cells per image, exclude perivascular cells.
-```{r spatial graphs}
+library(ggplot2)
+library(data.table)
+library(parallel)
 library(igraph)
+library(here)
+library(fst)
 
-#Split dataset in tumor and stromal cells
-tumour <- subset(cell_neighbors, (from_is_epithelial == T & to_is_epithelial == T)
-& (from_is_perivascular == F & to_is_perivascular == F))
-stromal <- subset(cell_neighbors, (from_is_epithelial == F & to_is_epithelial == F) 
-	& (from_is_perivascular == F & to_is_perivascular == F))
-
+cells <- read_fst(here("DATA/SingleCells.fst"), as.data.table = T)
+cellNeighbours <- read_fst(here("DATA/CellNeighbours.fst"), as.data.table = T)
+n_threads <- parallel::detectCores()
 ```
 
 ## Community detection
-2.	Detect communities based on random walks
+1. Create spatial graphs and 2. detect communities based on random walks
 
 ```{r community detection}
-n_threads <- parallel::detectCores()
 
+getCommunities <- function(dt){
+	g <- graph_from_data_frame(dt, directed = F)
+	subgraphs <- cluster_walktrap(g) #Community-detection algorithm
+	assignments <- membership(subgraphs)
+	matchOrder <- match(dt[[1]], as.numeric(names(assignments)))	
+	communities <- assignments[matchOrder]
+	return(data.table(communities))
+}
+
+getNetworkProperties <- function(dt){
+	g <- graph_from_data_frame(dt, directed = F)
+	# n of edges
+	nEdges <- ecount(g)
+	# n of vertices
+	nVertices <- vcount(g)
+	# length of the longest path (in number of edges) between two nodes
+	diameter <- diameter(g) 
+	# average number of edges between any two nodes in the network.
+	distance <- mean_distance(g)
+	# ratio of the number of edges and the number of possible edges
+	density <- edge_density(g)
+	# probability that the adjacent vertices of a vertex are connected. 
+	transitivity <- transitivity(g, type = 'global', isolates = 'zero')
+	dtout <- data.table(nEdges, nVertices, diameter, distance, density, transitivity)
+	return(dtout)
+}
+
+getAssortativity <- function(dt){
+	vertex_attributes <- melt(dt, id.var = names(dt)[3], value.name = 'vertex')
+	vertex_attributes <- vertex_attributes[, .SD[1], 
+		.SDcols = c('vertex', names(dt)[3]), by = vertex]
+	g <- graph_from_data_frame(dt, directed = F, 
+		vertices = vertex_attributes)
+	assortativity <- assortativity_nominal(g, type = V(g)$from_print_order)
+	return(assortativity)
+}
+
+images <- unique(cellNeighbours[['ImageNumber']])
+getSubgraphs <- function(image, dt){
+	image <- dt[ImageNumber == image]
+	graphCols <- c('from', 'to')
+	communityCols <- 'communities'
+	image[,  eval(communityCols) := getCommunities(.SD), .SDcols = graphCols]
+	properties <- c('nEdges', 'nVertices', 'diameter', 
+		'distance', 'density', 'transitivity')
+	image[, eval(properties) := getNetworkProperties(.SD), 
+		.SDcols = graphCols, by = communities]
+	image[, assortativity := getAssortativity(.SD), 
+		.SDcols =c('from', 'to', 'from_print_order'), by = communities]
+	image <- image[,.SD, .SDcols = c('ImageNumber', graphCols, 
+		communityCols, properties, 'assortativity')]
+	return(image)	
+}
+
+renameCommunityCols <- function(dt, type){
+	communityCol <- 'communities'
+	newname <- paste0(communityCol, '_', type)
+	setnames(dt, communityCol, newname)
+}
+
+# compartment communities
+mkGraphOut <- function(dt, type){
+	images <- unique(dt[['ImageNumber']])		
+	SubGraphs <- mclapply(images, getSubgraphs, dt, mc.cores = n_threads)
+	out <- rbindlist(SubGraphs)
+	renameCommunityCols(out, type)
+	return(out)
+}
+
+# Split epithelial and non-epithelial cells per image, exclude perivascular cells.
+tumour <- cellNeighbours[
+	(from_is_epithelial == T & to_is_epithelial == T)
+	& (from_is_vascular == F & to_is_vascular == F)
+	]
+tumour <- mkGraphOut(tumour, 'tumour')
+stromal <- cellNeighbours[(from_is_epithelial == F & to_is_epithelial == F) 
+	& (from_is_vascular == F & to_is_vascular == F)]
+stromal <- mkGraphOut(stromal, 'stromal')
+
+# two datasets out
+# 1. Communities ids
+toMerge <- function(dt){
+	communityCol <- grep('communities', names(dt), value = T)
+	toKeep <- c(communityCol, 'ImageNumber', 'from', 'to')
+	dt <- dt[, .SD, .SDcols = toKeep]
+	return(dt)
+}
+dts <- list(tumour = tumour, stroma = stromal)
+toMerge <- lapply(dts, toMerge)
+mergeTogether <- function(x, y){
+	out <- merge(x, y, by = c('ImageNumber', 'from', 'to'), all = T)
+}
+allOut <- Reduce(mergeTogether, toMerge)
+
+# 2. Network properties as list
+toNetworkLevel <- function(dt){
+	communityCol <- grep('communities', names(dt), value = T)
+	idCols <- c('ImageNumber', communityCol)
+	dt <- dt[, .SD[1], by = idCols]
+	colstoKeep <- setdiff(names(dt), c('from', 'to'))
+	dt <- dt[, .SD, .SDcols = colstoKeep]
+	return(dt)
+}
+NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
+
+communities <- allOut
+NetworkProperties <- NetworkLevelDts
+rm(list = setdiff(ls(), c('cells', 'cellNeighbours', 'communities', 'NetworkProperties')))
 
 ```
-
 
 ## Connectivity profiles
 3.	Define connectivity profiles for all communities as vertex degree per phenotype
 
+```{r connectivity profiles}
+
+```
+
 ## Cluster communities
 4.	Cluster with Ward’s method for hierarchical clustering
 
+```{r}
+
+```
+
+
 ## Validation
 5.	Validate reproducibility by training a random forest classifier on connectivity profiles
+
 
 ## Additional properties
 6.	Compute number of vertices, number of edges, diameter, density, transitivity and assortativity and Shannon diversity by cell phenotype.
