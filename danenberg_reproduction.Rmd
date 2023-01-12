@@ -372,9 +372,10 @@ hm <- Heatmap(toHMatrix,
 		heatmap_height = unit(20, 'cm')
 	)
 
-pdf(here("Output/heatmap4c"), width = w, height = h)	
+pdf(here("output/heatmap4c.pdf"), width = 20, height = 12)
 draw(hm)
 dev.off()
+
 
 ```
 
