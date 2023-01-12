@@ -23,6 +23,8 @@ library(igraph)
 library(here)
 library(fst)
 
+source(here("UtilityFunctions.R"))
+
 cells <- read_fst(here("DATA/SingleCells.fst"), as.data.table = T)
 cellNeighbours <- read_fst(here("DATA/CellNeighbours.fst"), as.data.table = T)
 n_threads <- parallel::detectCores()
@@ -141,28 +143,57 @@ NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
 communities <- allOut
 NetworkProperties <- NetworkLevelDts
 rm(list = setdiff(ls(), c('cells', 'cellNeighbours', 'communities', 'NetworkProperties')))
+communitiesAll <- communities
 
 ```
 
 ## Connectivity profiles
 3.	Define connectivity profiles for all communities as vertex degree per phenotype
 
-```{r connectivity profiles}
-
-
-
-```
 
 ## Cluster communities
 4.	Cluster with Ward’s method for hierarchical clustering
+
+
+```{r}
+#There are no train/validation labels available so we consider all cells for now. 
+cells <- cells %>%
+  add_column(isDiscovery = TRUE)
+
+cellNeighbours <- cellNeighbours[, .SD, 
+	.SDcols = c('ImageNumber', 'from', 'to', 'from_meta_description', 'to_meta_description')]
+
+communities <- melt(communities, id.vars = c('ImageNumber', 'from', 'to'), 
+	variable = 'type', value = 'communityID')
+communities <- communities[!is.na(communityID)]
+communities <- communities[grep('stromal', type)]
+
+trainValID <- cells[, .(ImageNumber, isDiscovery, metabric_id)]
+trainValID <- trainValID[, .SD[1], by = .(ImageNumber)]
+communities <- merge(x = communities, y = trainValID, by = 'ImageNumber') 
+setkeyv(communities, c('ImageNumber', 'communityID')) #mk unique community id
+communities[, communityUID := as.integer(seq_len(.N) == 1L), by = .(ImageNumber, communityID)]
+communities[, communityUID := cumsum(communityUID)]
+communities <- merge(x = communities, y = cellNeighbours, by = c('ImageNumber', 'from', 'to'))
+communities[, TotalInteractions := .N, by = communityUID]
+communities[, nInteractions := asinh(.N), by = .(communityUID, to_meta_description)]
+toCluster <- dcast(communities[, .SD[1], by = .(communityUID, to_meta_description)], 
+	ImageNumber + communityID + communityUID + metabric_id + isDiscovery + TotalInteractions ~ to_meta_description, 
+	value.var = 'nInteractions', fill = 0L)
+
+```
+
+
 
 ```{r}
 # Cell count threshold
 minCount <- 20
 
 mkCommunityModules <- function(Communities){
-	measureVars <- grep('Ep|SI', names(Communities), value = T)
-	
+  #NOTE:Uncertain which variables this grep() function is trying to grasp --> Ep: epithelial, SI: stromal_immune
+	# measureVars <- grep('Ep|SI', names(Communities), value = T)
+	measureVars <- c("TotalInteractions")
+  
 	k <- 10 # n clusters	
 
 	cat('Minimum interactions is:', minCount, '\n')
@@ -188,6 +219,32 @@ mkCommunityModules <- function(Communities){
 	return(Communities)
 }
 
+TMEStructuresDiscov <- mkCommunityModules(toCluster[(isDiscovery)])
+setnames(TMEStructuresDiscov, names(TMEStructuresDiscov), gsub(' ', '', names(TMEStructuresDiscov)))
+setnames(TMEStructuresDiscov, 'CommunityModuleID', 'TMEStructure')
+```
+```{r}
+ptLevel <- TMEStructuresDiscov[, .(ImageNumber, communityID, communityUID, TMEStructure)]
+communitiesAll <- communitiesAll[, .(ImageNumber, from, to, communities_stromal)][!is.na(communities_stromal)]
+setnames(communitiesAll, 'communities_stromal', 'communityID')
+ptLevel <- merge(x = communitiesAll, y = ptLevel, by = c('ImageNumber', 'communityID'))
+IDs <- cells[, .(ImageNumber, metabric_id)]
+IDs <- IDs[, .SD[1], by = .(ImageNumber)]
+ptLevel <- merge(x = ptLevel, y = IDs, by = 'ImageNumber') 
+ptLevel[, TotalInteractions := .N, by = metabric_id]
+ptLevel[,  nInteractionsPerStructure := .N, by = .(metabric_id, TMEStructure)]
+ptLevel <- 
+	ptLevel[, .SD[1], by = .(metabric_id, TMEStructure)][, 
+	.SD, .SDcols = grep('from|to', names(ptLevel), invert = TRUE, value = TRUE)]
+allCombinations <- as.data.table(expand.grid(ptLevel[, unique(metabric_id)], ptLevel[, unique(TMEStructure)])) #zeros
+setnames(allCombinations, c('Var1', 'Var2'), c('metabric_id', 'TMEStructure'))
+ptLevel <- merge(x = allCombinations, y = ptLevel, by = c('metabric_id', 'TMEStructure'), all.x = TRUE) 
+# ptLevel <- setorderv(ptLevel, c("metabric_id", "ImageNumber"))
+# ptLevel <- ptLevel[order("metabric_id", "ImageNumber", decreasing = FALSE)]
+ptLevel[, ImageNumber := ImageNumber[1], by = metabric_id]
+ptLevel[order(TotalInteractions, decreasing = FALSE), TotalInteractions := TotalInteractions[1], by = metabric_id]
+ptLevel[is.na(nInteractionsPerStructure), nInteractionsPerStructure := 0L]
+
 
 ```
 
@@ -195,6 +252,130 @@ mkCommunityModules <- function(Communities){
 ## Validation
 5.	Validate reproducibility by training a random forest classifier on connectivity profiles
 
+We skip this for now, because the train/validation labels are not known.
+
 
 ## Additional properties
 6.	Compute number of vertices, number of edges, diameter, density, transitivity and assortativity and Shannon diversity by cell phenotype.
+
+These are computed earlier already
+
+## Visualization: figure 4b
+
+```{r}
+library(ComplexHeatmap)
+library(latex2exp)
+source(here("UtilityFunctions.R"))
+
+cellTypes <- get_phenotypes()
+dat <- copy(TMEStructuresDiscov)
+cellVars = names(dat)[7:22]
+dat[, eval(cellVars) := lapply(.SD, scale_clip), .SDcols = cellVars]
+toHMatrix <- as.matrix(dat[, .SD, .SDcols = cellVars])
+rownames(toHMatrix) <- dat[, communityUID]
+
+celltypes_SI <- copy(cellTypes$stromal_immune)
+names(celltypes_SI$description) <- gsub(" ", "", names(celltypes_SI$description))
+
+mapColours <- data.frame(cellTypes$stromal_immune$description, gsub(" ", "", names(celltypes_SI$description)), names(cellTypes$stromal_immune$colours))
+names(mapColours) <- c("id", "type", "colour")
+mapColours = mapColours[match(colnames(toHMatrix),mapColours$type),]
+
+reorderSubset <- function(subset){
+	subset <- dat[TMEStructure == subset]
+	HC <- getHC(as.matrix(subset[, .SD, .SDcols = cellVars]), 
+		distance = 'euclidean', clustering = 'ward.D2')
+	subset <- setNames(subset[, TMEStructure], subset[, communityUID])
+	return(subset[HC$order])
+}
+
+reorderedSubsets <- mclapply(sortunique(dat[, TMEStructure]), reorderSubset, mc.cores = detectCores())
+toHMatrix <- toHMatrix[names(unlist(reorderedSubsets)),]
+toHMatrix <- t(toHMatrix)
+
+CellCols <- HeatmapAnnotation(
+	bar = rownames(toHMatrix),
+	col = list(bar = setNames(mapColours$colour, mapColours$type)), 
+	show_legend = F,
+	show_annotation_name = F,
+	which = 'row'
+)
+
+structures <- getStructures()
+setkey(structures$TME$dat, 'Structure')
+strColours <- setNames(structures$TME$dat[, colours], structures$TME$dat[, Structure])	
+columnAnno <- HeatmapAnnotation(str = unlist(reorderedSubsets), 
+	col = list(str = strColours), 
+	which = 'column', show_annotation_name = FALSE,
+	show_legend = FALSE
+)
+columnLabels <- setNames(structures$TME$dat[, Label], structures$TME$dat[, Structure])
+
+col_levs <- 19
+sval <- -2; eval <- 2
+cols <- viridisLite::magma(col_levs)
+distance <- abs((eval - sval)) / (col_levs - 1)
+range <- seq(sval, eval, distance)
+hmcols <- circlize::colorRamp2(range, cols)
+legend_ti <- 'z score'
+thin_line <- gpar(lwd = 0.5)
+labsi <- gpar(fontsize = 15)
+legend_ti <- "z-score"
+breaks <- c(sval, 0, eval)
+
+cm <- ColorMapping(name = legend_ti,
+    col_fun = hmcols)
+
+hmlegend <- list(
+	object = cm, 
+	# at = breaks, 
+	legend_height = unit(20, 'mm'),
+	grid_width = unit(3, 'mm'),
+	title_gp = labsi,
+	labels_gp = labsi,
+	legend_gp = gpar(lwd = 0.1),
+	border = rgb(0,0,0, alpha = 0)
+)
+
+rowLabels <- sapply(rownames(toHMatrix), TeX)
+rowLabels[16] <- expression(paste('M', Phi, ' & granulocytes'))
+fontSize <- 22
+
+hm <- Heatmap(toHMatrix,
+		col = hmcols,
+		column_split = unlist(reorderedSubsets),
+		column_gap = unit(2.5, 'mm'),
+		row_labels = unlist(rowLabels),
+		column_title = sapply(columnLabels, latex2exp::TeX),
+		column_title_side = "bottom",
+		row_title_gp = gpar(fontsize = fontSize),
+		column_title_gp = gpar(fontsize = fontSize),
+		column_title_rot = -90,
+		row_names_side = 'left',
+		left_annotation = CellCols,
+		row_dend_side = 'right',
+		column_dend_side = 'bottom',
+		show_row_names = T,
+		show_column_names = F,
+		cluster_columns = F,
+		cluster_rows = T,
+		show_row_dend = F,
+		show_column_dend = F,
+		top_annotation = columnAnno,
+		bottom_annotation = columnAnno,
+		row_names_gp = gpar(fontsize = fontSize),
+		row_dend_gp = thin_line,
+		column_dend_gp = thin_line,
+		heatmap_legend_param = hmlegend,
+		raster_device = 'png',
+		raster_quality = 25,
+		heatmap_height = unit(20, 'cm')
+	)
+
+pdf(here("Output/heatmap4c"), width = w, height = h)	
+draw(hm)
+dev.off()
+
+```
+
+
