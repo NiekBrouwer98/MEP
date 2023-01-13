@@ -22,11 +22,15 @@ library(parallel)
 library(igraph)
 library(here)
 library(fst)
+library(assertthat)
+library(RColorBrewer)
+library(latex2exp)
 
 source(here("UtilityFunctions.R"))
 
-cells <- read_fst(here("DATA/SingleCells.fst"), as.data.table = T)
-cellNeighbours <- read_fst(here("DATA/CellNeighbours.fst"), as.data.table = T)
+cells <- getCells()
+cellNeighbours <- getCellNeighbours()
+images <- unique(cellNeighbours[['ImageNumber']])
 n_threads <- parallel::detectCores()
 ```
 
@@ -72,7 +76,6 @@ getAssortativity <- function(dt){
 	return(assortativity)
 }
 
-images <- unique(cellNeighbours[['ImageNumber']])
 getSubgraphs <- function(image, dt){
 	image <- dt[ImageNumber == image]
 	graphCols <- c('from', 'to')
@@ -143,7 +146,8 @@ NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
 communities <- allOut
 NetworkProperties <- NetworkLevelDts
 rm(list = setdiff(ls(), c('cells', 'cellNeighbours', 'communities', 'NetworkProperties')))
-communitiesAll <- communities
+communitiesAll <- copy(communities)
+source(here("UtilityFunctions.R"))
 
 ```
 
@@ -187,12 +191,17 @@ toCluster <- dcast(communities[, .SD[1], by = .(communityUID, to_meta_descriptio
 
 ```{r}
 # Cell count threshold
+cellTypes <- get_phenotypes()
+SI_cells <- copy(names(cellTypes$stromal_immune$description))
+ep_cells <- copy(names(cellTypes$epithelial$description))
+
 minCount <- 20
 
 mkCommunityModules <- function(Communities){
   #NOTE:Uncertain which variables this grep() function is trying to grasp --> Ep: epithelial, SI: stromal_immune
 	# measureVars <- grep('Ep|SI', names(Communities), value = T)
-	measureVars <- c("TotalInteractions")
+	measureVars <- names(Communities %>% select(any_of(SI_cells)))
+  data <- append(measureVars, names(Communities %>% select(any_of(ep_cells))))
   
 	k <- 10 # n clusters	
 
@@ -220,15 +229,22 @@ mkCommunityModules <- function(Communities){
 }
 
 TMEStructuresDiscov <- mkCommunityModules(toCluster[(isDiscovery)])
-setnames(TMEStructuresDiscov, names(TMEStructuresDiscov), gsub(' ', '', names(TMEStructuresDiscov)))
+# setnames(TMEStructuresDiscov, names(TMEStructuresDiscov), gsub(' ', '', names(TMEStructuresDiscov)))
 setnames(TMEStructuresDiscov, 'CommunityModuleID', 'TMEStructure')
+
+TMEStructures <- copy(TMEStructuresDiscov)
 ```
+
+Communities are now clustered and labeled. We aggregate the clusters per patient.
+
+
 ```{r}
-ptLevel <- TMEStructuresDiscov[, .(ImageNumber, communityID, communityUID, TMEStructure)]
+
+ptLevel <- TMEStructures[, .(ImageNumber, communityID, communityUID, TMEStructure)]
 communitiesAll <- communitiesAll[, .(ImageNumber, from, to, communities_stromal)][!is.na(communities_stromal)]
 setnames(communitiesAll, 'communities_stromal', 'communityID')
 ptLevel <- merge(x = communitiesAll, y = ptLevel, by = c('ImageNumber', 'communityID'))
-IDs <- cells[, .(ImageNumber, metabric_id)]
+IDs <- getCells()[, .(ImageNumber, metabric_id)]
 IDs <- IDs[, .SD[1], by = .(ImageNumber)]
 ptLevel <- merge(x = ptLevel, y = IDs, by = 'ImageNumber') 
 ptLevel[, TotalInteractions := .N, by = metabric_id]
@@ -239,12 +255,10 @@ ptLevel <-
 allCombinations <- as.data.table(expand.grid(ptLevel[, unique(metabric_id)], ptLevel[, unique(TMEStructure)])) #zeros
 setnames(allCombinations, c('Var1', 'Var2'), c('metabric_id', 'TMEStructure'))
 ptLevel <- merge(x = allCombinations, y = ptLevel, by = c('metabric_id', 'TMEStructure'), all.x = TRUE) 
-# ptLevel <- setorderv(ptLevel, c("metabric_id", "ImageNumber"))
-# ptLevel <- ptLevel[order("metabric_id", "ImageNumber", decreasing = FALSE)]
+ptLevel <- ptLevel[order(metabric_id, ImageNumber, decreasing = FALSE)]
 ptLevel[, ImageNumber := ImageNumber[1], by = metabric_id]
 ptLevel[order(TotalInteractions, decreasing = FALSE), TotalInteractions := TotalInteractions[1], by = metabric_id]
 ptLevel[is.na(nInteractionsPerStructure), nInteractionsPerStructure := 0L]
-
 
 ```
 
@@ -258,29 +272,26 @@ We skip this for now, because the train/validation labels are not known.
 ## Additional properties
 6.	Compute number of vertices, number of edges, diameter, density, transitivity and assortativity and Shannon diversity by cell phenotype.
 
-These are computed earlier already
+These are computed earlier already and saved in the data.table 'NetworkProperties'
 
 ## Visualization: figure 4b
 
 ```{r}
 library(ComplexHeatmap)
 library(latex2exp)
-source(here("UtilityFunctions.R"))
 
 cellTypes <- get_phenotypes()
-dat <- copy(TMEStructuresDiscov)
-cellVars = names(dat)[7:22]
+dat <- copy(TMEStructures)
+cellVars = names(dat %>% select(any_of(SI_cells)))
 dat[, eval(cellVars) := lapply(.SD, scale_clip), .SDcols = cellVars]
 toHMatrix <- as.matrix(dat[, .SD, .SDcols = cellVars])
 rownames(toHMatrix) <- dat[, communityUID]
 
-celltypes_SI <- copy(cellTypes$stromal_immune)
-names(celltypes_SI$description) <- gsub(" ", "", names(celltypes_SI$description))
-
-mapColours <- data.frame(cellTypes$stromal_immune$description, gsub(" ", "", names(celltypes_SI$description)), names(cellTypes$stromal_immune$colours))
-names(mapColours) <- c("id", "type", "colour")
-mapColours = mapColours[match(colnames(toHMatrix),mapColours$type),]
-
+matrix_cells <- colnames(toHMatrix)
+cell_colours <- data.frame(names(cellTypes$stromal_immune$description), names(cellTypes$stromal_immune$colours))
+mapColours <- cell_colours[,2][match(matrix_cells, cell_colours[,1])]
+mapColours <- setNames(mapColours, matrix_cells)
+                                                                                  
 reorderSubset <- function(subset){
 	subset <- dat[TMEStructure == subset]
 	HC <- getHC(as.matrix(subset[, .SD, .SDcols = cellVars]), 
@@ -295,7 +306,7 @@ toHMatrix <- t(toHMatrix)
 
 CellCols <- HeatmapAnnotation(
 	bar = rownames(toHMatrix),
-	col = list(bar = setNames(mapColours$colour, mapColours$type)), 
+	col = list(bar = mapColours), 
 	show_legend = F,
 	show_annotation_name = F,
 	which = 'row'
@@ -375,7 +386,189 @@ hm <- Heatmap(toHMatrix,
 pdf(here("output/heatmap4c.pdf"), width = 20, height = 12)
 draw(hm)
 dev.off()
+```
 
+## Visualization: figure 4d
+
+```{r}
+library(vegan)
+
+communitiesIDs = copy(communitiesAll)
+communityTMEMapping <- copy(TMEStructures)
+communityTMEMapping <- communityTMEMapping %>% select(-any_of(SI_cells))
+structures <- getStructures()
+communityTMEMapping <- merge(x = communityTMEMapping, y = structures$TME$dat, 
+	by.x = 'TMEStructure', by.y = 'Structure')
+
+oldNames <- c('Label', 'colours', 'print_order')
+newNames <- paste0('TMEStr', oldNames)
+setnames(communityTMEMapping, oldNames, newNames)
+communityIDs <- merge(x = communitiesIDs, y = communityTMEMapping, 
+	by= c('ImageNumber', 'communityID')) 
+setkeyv(communityIDs, c('ImageNumber', 'communityID', 'from'))
+
+nwProperties <- copy(NetworkProperties)
+nwProperties <- nwProperties[['stroma']]
+setnames(nwProperties, 'communities_stromal', 'communityID')
+communityIDs <- merge(x = communityIDs, y = nwProperties[, .(ImageNumber, communityID, nVertices)], 
+	by = c('ImageNumber', 'communityID')) 
+
+cellDat <- getCells()[(isTumour)]
+communityIDs <- merge(x = communityIDs, y = cellDat, 
+	by.x = c('ImageNumber', 'from'), by.y = c('ImageNumber', 'ObjectNumber')) 
+communityIDs[, uniqueCell := (seq_len(.N) == 1L), by = .(ImageNumber, communityID, from)]
+communityIDs[(uniqueCell), shannonDiversity := vegan::diversity(TMEStrprint_order), by = .(communityUID)]
+
+toPlot <- communityIDs[, .SD[1], by = communityUID]
+toPlot[, TotalCommunities := .N, by = TMEStructure]
+toPlot[, medianNVertices := median(as.numeric(nVertices)), by = TMEStructure]
+toPlot <- toPlot[order(medianNVertices, TMEStructure)]
+toPlot[, yaxis := as.integer(seq_len(.N) == 1L), by = TMEStructure]
+toPlot[, yaxis := cumsum(yaxis)]
+toPlot <- toPlot[order(yaxis, decreasing = TRUE)]
+
+toPlot[, yaxisRev := as.integer(seq_len(.N) == 1L), by = yaxis]
+toPlot[, yaxisRev := cumsum(yaxisRev)]
+toPlot[, yaxisRev := factor(yaxisRev, 
+	levels = unique(yaxisRev), labels = unique(TMEStrLabel), ordered = TRUE)]
+toPlot <- melt(toPlot, id.vars = c('yaxisRev', 'communityUID', 'TMEStrcolours','TMEStrLabel', 'TotalCommunities'), 
+	measure.vars = c('nVertices', 'shannonDiversity'))
+toPlot[, variable := ifelse(grepl('nVertices', variable), 'Cell count', 'Shannon diversity')]
+
+
+lineW <- 0.2
+box <- ggplot() +
+	geom_boxplot(data = toPlot,
+		aes(x = yaxisRev, y = value, fill = TMEStrcolours),
+		outlier.size = 0.1, size = lineW) +
+	scale_fill_identity() +
+	scale_x_discrete(labels = unique(toPlot$TMEStrLabel)) +
+	facet_grid(cols = vars(variable),
+	scales = 'free', space = 'fixed') +
+	theme_prj(base_line_size = lineW) +
+	theme(axis.title.x = element_blank(),
+		plot.margin = unit(c(0,0,0,0), 'npc')) +
+	coord_flip() +
+	labs(x = 'TME structure')
+
+toPlot[variable == 'Cell count', countfacet := factor(1, levels = 1, 
+	labels = expression(paste(italic('n'), 'communities')), ordered = TRUE)]
+
+counts <- ggplot(data = toPlot[, .SD[1], by = yaxisRev]) +
+	geom_col(aes(x = yaxisRev, y = TotalCommunities), fill = 'lightgrey') +
+	geom_text(aes(x = yaxisRev, y = TotalCommunities, label = TotalCommunities),
+		hjust = 0, nudge_y = 50) +
+	theme_prj(base_line_size = lineW) +
+	theme(axis.text.y = element_blank(),
+		axis.text.x = element_text(colour = 'white'),
+		axis.title = element_blank(),
+		axis.line.y = element_blank(),
+		axis.ticks.y = element_blank(),
+		axis.line.x = element_line(colour = 'white'),
+		axis.ticks.x = element_line(colour = 'white'),
+		plot.margin = unit(c(0,0.4,0,0), 'npc')) +
+	coord_flip(clip = 'off') +
+	scale_x_discrete(labels = unique(toPlot$TMEStrLabel)) +
+	scale_y_continuous(expand = c(0,0), limits = c(0,4000)) +
+	facet_grid(cols = vars(countfacet)) 
+
+library(cowplot)
+p <- plot_grid(box, counts, nrow = 1, rel_widths = c(1, 0.4))
+save_plot(here('output/TMEStructuresVCellCountShannonBox.pdf'), p,
+	base_height = 1.9, base_width = 5.4)
+		
+
+```
+
+
+
+## Visualization: figure 4f
+```{r}
+cellNeighbours <- getCellNeighbours()
+cellNeighbours <- cellNeighbours[, .SD, 
+	.SDcols = setdiff(names(cellNeighbours), c('metabric_id', 'TMEStructure', 'communityID', 'isDiscovery'))]
+communitiesIDs = copy(communitiesAll)
+communityTMEMapping <- copy(TMEStructures)
+communityTMEMapping <- communityTMEMapping %>% select(-any_of(SI_cells))
+communityIDs <- merge(x = communitiesIDs, y = communityTMEMapping, 
+	by = c('ImageNumber', 'communityID')) 
+cellNeighbours <- merge(x = cellNeighbours, y = communityIDs, 
+	by = c('ImageNumber', 'from', 'to')) 
+
+mkDegrees <- function(graph_dt){
+	degrees <- graph_from_data_frame(graph_dt[, .(from, to)], directed = F)
+	degrees <- simplify(degrees)
+	nVertices <- length(V(degrees))
+	degrees <- degree(degrees, loops = F)
+	degrees_dt <- data.table(from = as.integer(names(degrees)), 
+		degree = degrees, nVertices = nVertices)
+	graph <- merge(x = graph_dt, y = degrees_dt, by = 'from') 
+	return(graph)
+}
+
+Degrees <- split(cellNeighbours, by = 'communityUID')
+Degrees <- mclapply(Degrees, mkDegrees, mc.cores = detectCores())
+Degrees <- rbindlist(Degrees)
+stopifnot(Degrees[is.na(degree), .N] == 0L)
+maxDegreeClip <- 9
+Degrees[, degree := ifelse(degree > maxDegreeClip, maxDegreeClip, degree)]
+Degrees[, totalDegree := .N, by = .(TMEStructure, degree)]
+Degrees[, proportion := .N / totalDegree, by = .(TMEStructure, degree, to_meta_description)]
+
+toPlot <- Degrees[, .SD[1], by = .(TMEStructure, degree, to_meta_description)]
+cellPhenotypes <- get_phenotypes()
+filllabs <- names(cellPhenotypes$stromal_immune$description)
+fillcols <- cellPhenotypes$stromal_immune$colours
+toPlot[, fillColOrder := factor(to_print_order, 
+	levels = sortunique(to_print_order), 
+	labels = names(fillcols),  ordered = TRUE)]
+
+structures <- getStructures()
+toMapVar <- structures$TME$dat[order(print_order)]
+mapVar <- setNames(toMapVar[, print_order], toMapVar[,Label])
+toPlot[, TMEStructureNo := mapVar[TMEStructure]]
+# facetlabs <- unlist(lapply(names(mapVar), TeX), use.names = F)
+facetlabs <- names(mapVar)
+printMap <- setNames(structures$TME$dat[,print_order], structures$TME$dat[,Structure])
+toPlot[, facet_by := printMap[as.character(TMEStructure)]]
+toPlot[, facet_by := factor(facet_by, 
+	levels = as.integer(mapVar), labels = facetlabs, ordered = TRUE)]
+
+xbreaks <- toPlot[, sortunique(degree)]
+xlabs <- as.character(xbreaks)
+xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
+legend_colours <- names(fillcols)
+# legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
+legend_labels <- filllabs
+
+mkStackedArea <- function(dat){
+	p <- ggplot() +
+	geom_area(data = dat, 
+		aes(x = degree, y = proportion, fill = fillColOrder), size = 1) +
+	scale_y_continuous(expand = c(0,0), breaks = c(0,1), labels = c('0', '1')) +
+	scale_x_continuous(expand = c(0,0), breaks = xbreaks, labels = xlabs) +
+	scale_fill_identity(
+		'Cell phenotype',
+		breaks = legend_colours,
+		labels = legend_labels,
+		guide = 'legend'
+	) +		
+	theme_prj(base_line = 0.25) +
+	facet_wrap(vars(facet_by), nrow = 2) +
+	labs(x = 'Vertex degree (cell interactions)', y = 'Proportion') +
+	guides(fill = guide_legend(title.position = 'top', ncol = 1, 
+		keywidth = 0.5, keyheight = 0.5, label.position = 'left', label.hjust = 1)) +
+	theme(
+		axis.text = element_text(size = 5),
+		strip.background = element_blank(), 
+		strip.text = element_text(size = 6.25, margin = margin(t = 0, b = 0)),
+		panel.spacing = unit(1, 'mm'),
+		legend.position = 'left', legend.title.align = 1)
+	return(p)
+}
+
+plotOut <- mkStackedArea(dat = toPlot)
+save_plot(here('output/TMEStructuresVertexDegreeStackedArea.pdf'), plotOut, base_width = 7.35)
 
 ```
 

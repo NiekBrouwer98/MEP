@@ -94,7 +94,7 @@ getClinical <- function() {
 #'
 #'@return data.table of formatted single cell data
 getCells <- function() {
-  cells <- read_fst(here('SingleCells.fst'), as.data.table = T)
+  cells <- read_fst(here('DATA/SingleCells.fst'), as.data.table = T)
   return(cells)
 }
 
@@ -296,7 +296,7 @@ getMatched <- function(pattern, toMatch) regmatches(toMatch, regexpr(pattern, to
 #'
 #'@return data.table of formatted cell neighbour data
 getCellNeighbours <- function() {
-  cells <- read_fst(here('CellNeighbours.fst'), as.data.table = T)
+  cells <- read_fst(here('DATA/CellNeighbours.fst'), as.data.table = T)
   return(cells)
 }
 
