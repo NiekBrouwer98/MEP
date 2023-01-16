@@ -14,7 +14,7 @@ We focus on the description of the spatial organization of the TME as presented 
 
 The separation and phenotype classification of single cells is not reproduced and this is retrieved from the original paper.
 
-```{r libraries and settings, echo=FALSE}
+```{r libraries and settings}
 library(tidyverse)
 library(ggplot2)
 library(data.table)
@@ -22,26 +22,164 @@ library(parallel)
 library(igraph)
 library(here)
 library(fst)
+library(assertthat)
+library(RColorBrewer)
+library(latex2exp)
+library(cowplot)
 
-cells <- read_fst(here("DATA/SingleCells.fst"), as.data.table = T)
-cellNeighbours <- read_fst(here("DATA/CellNeighbours.fst"), as.data.table = T)
+source(here("UtilityFunctions.R"))
+
+# set seed
+projectSeed <- 89230689
+set.seed(projectSeed)
+
+cells <- getCells()
+cellNeighbours <- getCellNeighbours()
+phenotypes <- get_phenotypes()
+images <- unique(cellNeighbours[['ImageNumber']])
 n_threads <- parallel::detectCores()
 ```
 
+## Data discovery
+We reproduce the visualization of the cell phenotype counts and proportions as shown in extended figure 2 to show that the input datasets are the same.
+
+```{r data discovery}
+cell_dat <- cells[, .(ImageNumber, ObjectNumber, is_epithelial, meta_description,
+		print_order, meta_id, colours)]
+
+# Get rectangularised proportion (or count) data
+# Hierarchical cluster order by count data
+count_dat <- cell_dat[, ncells := .N, by = .(ImageNumber, meta_description)] 
+count_dat <- dcast(count_dat, ImageNumber ~ meta_description, value.var = 'ncells')
+hc_order_count <- getHC(count_dat[, -c('ImageNumber'), with = F])	
+hc_order_count <- count_dat[hc_order_count$order, hc_order_count := seq_len(.N)][, 
+	.(ImageNumber, hc_order_count)]
+cell_dat <- merge(cell_dat, hc_order_count, by = 'ImageNumber')
+
+# Hierarchical cluster order by proportion data
+prop_dat <- copy(cell_dat[, ncells := .N, by = .(ImageNumber, meta_description)])
+prop_dat[, totalcells := .N, by = .(ImageNumber, is_epithelial)] 
+prop_dat[, proportion := (ncells / totalcells)]
+prop_dat <- dcast(prop_dat, ImageNumber ~ meta_description, 
+	value.var = 'proportion')
+prop_dat[is.na(prop_dat)] <- 0
+hc_order_prop <- getHC(prop_dat[, -c('ImageNumber'), with = F])
+hc_order_prop <- prop_dat[hc_order_prop$order, 
+	hc_order_prop := seq_len(.N)][, .(ImageNumber, hc_order_prop)]
+cell_dat <- merge(cell_dat, hc_order_prop, by = 'ImageNumber')	
+
+cell_dat[, tokeep := (seq_len(.N) == 1), by = .(ImageNumber, meta_description)]
+cell_dat <- cell_dat[tokeep == T][, tokeep := NULL]
+cell_dat[is_epithelial == T, facet_by := 'Epithelial'][is_epithelial == F,
+	facet_by := 'TME']
+
+# Legend and stack order
+legend_colours <- c(names(phenotypes$epithelial$colours),
+	names(phenotypes$stromal_immune$colours))
+legend_labels <- c(names(phenotypes$epithelial$description),
+	names(phenotypes$stromal_immune$description))
+legend_labels <- lapply(legend_labels, TeX)
+
+cell_dat$colours <-
+	factor(cell_dat$colours, levels = legend_colours, 
+		ordered = T)
+
+mkplot <- function(proportion = F){
+	
+	if (proportion){
+		stack <- 'fill'
+		xvar <- 'hc_order_prop'
+		ylabs <- c('0', '0.5', '1')
+		ybreaks <- c(0, 0.5, 1)
+		yti <- 'Proportion'
+	} else{
+		stack <- 'stack'
+		xvar <- 'hc_order_count'
+		ylabs <- c('0', '4k', '8k')
+		ybreaks <- c(0, 4e3, 8e3)
+		yti <- 'Number of cells'
+	}
+
+	xmax <- cell_dat[, max(get(xvar))]
+
+	p <- 
+		ggplot() +
+		geom_bar(data = cell_dat,
+			aes(x = get(xvar),
+				y = ncells,
+				fill = colours),
+			position = stack,
+			stat = 'identity', width = 1
+			) +
+		scale_fill_identity(
+			'Cell phenotype',
+			breaks = legend_colours,
+			labels = legend_labels,
+			guide = 'legend'
+			) +
+		facet_wrap(~facet_by, nrow = 2) +
+		scale_x_continuous(
+			expand = c(0,0), 
+			breaks = c(1, xmax)) +
+		scale_y_continuous(
+			expand = c(0,0),
+			labels = ylabs,
+			breaks = ybreaks
+			) +
+		theme_prj() +
+		theme(
+			plot.margin = unit(rep(0.5, 4), 'cm'),
+			axis.line = element_blank(),
+			axis.ticks = element_blank(),
+			axis.text = element_text(size = 9),
+			axis.title = element_text(size = 9),
+			axis.title.y = element_text(angle = 90),
+			strip.text  = element_text(size = 9, margin = margin(0,0,0,0, unit = 'pt')),
+			strip.background = element_rect(fill = 'lightgrey', colour = 'lightgrey'),
+			legend.position = 'bottom',
+			legend.text = element_text(size = 9),
+			legend.key.size = unit(0.5, 'line'),
+			legend.title = element_text(size = 11)
+			) +
+		guides(fill = guide_legend(
+			title.position = 'top')) +
+		labs(x = 'Tissue image', y = yti)
+
+}	
+
+counts <- mkplot(proportion = F)
+proportions <- mkplot(proportion = T)
+
+counts <- extract_gglegend(counts)
+legend <- counts$legend
+counts <- counts$plot
+proportions <- extract_gglegend(proportions)
+proportions <- proportions$plot
+p <- plot_grid(counts, proportions, ncol = 1, align = 'v')
+p <- plot_grid(p, legend, ncol = 1, rel_heights = c(6, 1))
+outfile <- file.path(here('output/stacked_bar_CountsProportionsCombined.pdf'))
+ggsave(outfile, p, height = 7, width = 8)
+
+```
+
+
+
 ## Community detection
-1. Create spatial graphs and 2. detect communities based on random walks
+The TME is represented as a graph to use the community-detection algorithm to find densely connected cell clusters.
 
-```{r community detection}
+```{r community detection and property calculation}
 
+# Run communiy-detection algorithm
 getCommunities <- function(dt){
 	g <- graph_from_data_frame(dt, directed = F)
-	subgraphs <- cluster_walktrap(g) #Community-detection algorithm
+	subgraphs <- cluster_walktrap(g)
 	assignments <- membership(subgraphs)
 	matchOrder <- match(dt[[1]], as.numeric(names(assignments)))	
 	communities <- assignments[matchOrder]
 	return(data.table(communities))
 }
 
+# Retrieve network properties of individual communties for later analyses
 getNetworkProperties <- function(dt){
 	g <- graph_from_data_frame(dt, directed = F)
 	# n of edges
@@ -70,7 +208,6 @@ getAssortativity <- function(dt){
 	return(assortativity)
 }
 
-images <- unique(cellNeighbours[['ImageNumber']])
 getSubgraphs <- function(image, dt){
 	image <- dt[ImageNumber == image]
 	graphCols <- c('from', 'to')
@@ -138,30 +275,533 @@ toNetworkLevel <- function(dt){
 }
 NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
 
-communities <- allOut
-NetworkProperties <- NetworkLevelDts
-rm(list = setdiff(ls(), c('cells', 'cellNeighbours', 'communities', 'NetworkProperties')))
-
+# Collect result and clean intermediate results
+communities <- copy(allOut)
+NetworkProperties <- copy(NetworkLevelDts)
+rm(list = setdiff(ls(), c('communities', 'NetworkProperties')))
+source(here("UtilityFunctions.R"))
 ```
 
-## Connectivity profiles
-3.	Define connectivity profiles for all communities as vertex degree per phenotype
-
-```{r connectivity profiles}
-
-```
 
 ## Cluster communities
-4.	Cluster with Ward’s method for hierarchical clustering
+For the detected communities, connectivity profiles are computed (phenotype composition and vertex degree).
 
-```{r}
+```{r setup clustering}
+# Retrieve input datasets
+cells <- getCells()
+cellNeighbours <- getCellNeighbours()
+phenotypes <- get_phenotypes()
+communitiesResult <- copy(communities) #save a version of the original communities
+
+cellNeighbours <- cellNeighbours[, .SD, 
+	.SDcols = c('ImageNumber', 'from', 'to', 'from_meta_id', 'to_meta_id')]
+
+communities <- melt(communities, id.vars = c('ImageNumber', 'from', 'to'), 
+	variable = 'type', value = 'communityID')
+communities <- communities[!is.na(communityID)]
+communities <- communities[grep('stromal', type)]
+
+trainValID <- getCells()[, .(ImageNumber, isDiscovery, metabric_id)]
+trainValID <- trainValID[, .SD[1], by = .(ImageNumber)]
+communities <- merge(x = communities, y = trainValID, by = 'ImageNumber') 
+setkeyv(communities, c('ImageNumber', 'communityID')) #mk unique community id
+communities[, communityUID := as.integer(seq_len(.N) == 1L), by = .(ImageNumber, communityID)]
+communities[, communityUID := cumsum(communityUID)]
+communities <- merge(x = communities, y = cellNeighbours, by = c('ImageNumber', 'from', 'to'))
+communities[, TotalInteractions := .N, by = communityUID]
+communities[, nInteractions := asinh(.N), by = .(communityUID, to_meta_id)]
+toCluster <- dcast(communities[, .SD[1], by = .(communityUID, to_meta_id)], 
+	ImageNumber + communityID + communityUID + metabric_id + isDiscovery + TotalInteractions ~ to_meta_id, 
+	value.var = 'nInteractions', fill = 0L)
+```
+
+The communities are clustered with Ward’s method for hierarchical clustering.
+
+```{r clustering}
+# Cell count threshold
+minCount <- 20
+
+mkCommunityModules <- function(Communities){
+	measureVars <- grep('Ep|SI', names(Communities), value = T)
+	
+	k <- 10 # n clusters	
+
+	cat('Minimum interactions is:', minCount, '\n')
+	cat('No of clusters is:', k, '\n')
+	
+	Communities <- Communities[TotalInteractions > minCount]
+	Communities[, id := seq_len(.N)]
+
+	getHCGroups <- function(dt, k) {
+		dmat <- dist(dt, method = 'canberra')
+		hc <- hclust(dmat, method = 'ward.D2')
+		order <- hc$order
+		groups <- stats::cutree(hc, k = k)
+		return(list(groups = groups, order = order))
+	}
+	
+	toHC <- as.matrix(Communities[, .SD, .SDcols = c(measureVars, 'id')], rownames = 'id')
+	hcOut <- getHCGroups(toHC, k = k)
+	Groups <- data.table(CommunityModuleID = hcOut$groups, 
+		id = as.integer(names(hcOut$groups)))		
+	Communities <- merge(Communities, Groups, by = 'id')
+	Communities[, id := NULL]
+	return(Communities)
+}
+
+TMEStructuresDiscov <- mkCommunityModules(toCluster[(isDiscovery)])
+setnames(TMEStructuresDiscov, names(TMEStructuresDiscov), gsub(' ', '', names(TMEStructuresDiscov)))
+setnames(TMEStructuresDiscov, 'CommunityModuleID', 'TMEStructure')
+```
+
+## Validation
+Reproducibility is validated by training a random forest classifier on connectivity profiles.
+
+```{r validation}
+RFCCols <- c('TMEStructure', grep('SI', names(TMEStructuresDiscov), value = TRUE))
+RFCModel <- randomForest::randomForest(formula = as.factor(TMEStructure) ~ ., 
+	data = TMEStructuresDiscov[, .SD, .SDcols = RFCCols],
+	importance = TRUE, mtry = 12)
+RFCModel
+
+toClusterValidation <- toCluster[!(isDiscovery)][TotalInteractions > minCount]
+oldNames <- grep('SI', names(toClusterValidation), value = TRUE)
+newNames <- gsub(' ', '', oldNames)
+setnames(toClusterValidation, oldNames, newNames)
+predictions <- predict(RFCModel, 
+	toClusterValidation[, .SD, 
+	.SDcols = grep('SI', names(toClusterValidation), value = TRUE)])
+toClusterValidation[, TMEStructure := predictions] 
+
+TMEStructuresDiscov[, isDiscovery := TRUE]
+toClusterValidation[, isDiscovery := FALSE]
+TMEStructures <- rbindlist(list(TMEStructuresDiscov, toClusterValidation))
+outfile <- here('scratch/TMEStructures.fst')
+write_fst(TMEStructures, outfile, compress = 100) 
+
+cellNeighbours <- getCellNeighbours()
+checkIDs <- cellNeighbours[, .(ImageNumber, communityID, TMEStructure)]
+checkIDs <- checkIDs[, .SD[1], by = .(ImageNumber, communityID)]
+checkIDs <- na.omit(checkIDs)
+setkeyv(checkIDs, names(checkIDs))
+setkeyv(TMEStructures, names(checkIDs))
+
+library(diffdf)
+
+# Print differences
+issues <- diffdf(TMEStructures[, .SD, .SDcols = names(checkIDs)], checkIDs)
+TMEStructures[issues$VarDiff_TMEStructure$..ROWNUMBER..,]
 
 ```
 
+Aggregate clusters per patient
 
-## Validation
-5.	Validate reproducibility by training a random forest classifier on connectivity profiles
+```{r cluster aggregation}
+
+ptLevel <- TMEStructures[, .(ImageNumber, communityID, communityUID, TMEStructure)]
+communitiesAll <- communitiesResult[, .(ImageNumber, from, to, communities_stromal)][!is.na(communities_stromal)]
+setnames(communitiesAll, 'communities_stromal', 'communityID')
+ptLevel <- merge(x = communitiesAll, y = ptLevel, by = c('ImageNumber', 'communityID'))
+IDs <- getCells()[, .(ImageNumber, metabric_id)]
+IDs <- IDs[, .SD[1], by = .(ImageNumber)]
+ptLevel <- merge(x = ptLevel, y = IDs, by = 'ImageNumber') 
+ptLevel[, TotalInteractions := .N, by = metabric_id]
+ptLevel[,  nInteractionsPerStructure := .N, by = .(metabric_id, TMEStructure)]
+ptLevel <- 
+	ptLevel[, .SD[1], by = .(metabric_id, TMEStructure)][, 
+	.SD, .SDcols = grep('from|to', names(ptLevel), invert = TRUE, value = TRUE)]
+allCombinations <- adt(expand.grid(ptLevel[, unique(metabric_id)], ptLevel[, unique(TMEStructure)])) #zeros
+setnames(allCombinations, c('Var1', 'Var2'), c('metabric_id', 'TMEStructure'))
+ptLevel <- merge(x = allCombinations, y = ptLevel, by = c('metabric_id', 'TMEStructure'), all.x = TRUE) 
+ptLevel <- ptLevel[order(metabric_id, ImageNumber, decreasing = FALSE)]
+ptLevel[, ImageNumber := ImageNumber[1], by = metabric_id]
+ptLevel[order(TotalInteractions, decreasing = FALSE), TotalInteractions := TotalInteractions[1], by = metabric_id]
+ptLevel[is.na(nInteractionsPerStructure), nInteractionsPerStructure := 0L]
+outfile <- here('scratch/ptLeveLTMEInteractions.fst')
+write_fst(ptLevel, outfile, compress = 100)
+
+#Clean intermediate results
+rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+source(here("UtilityFunctions.R"))
+```
 
 
-## Additional properties
-6.	Compute number of vertices, number of edges, diameter, density, transitivity and assortativity and Shannon diversity by cell phenotype.
+## Visualization: figure 4b Heatmap
+
+```{r heatmap 4b}
+library(ComplexHeatmap)
+library(latex2exp)
+
+toHM <- function(dat, fileToSave, height = NULL, isDiscovery) {
+	cellTypes <- get_phenotypes()
+	dat <- copy(dat)
+	cellVars <- grep('SI', names(dat), value = TRUE)
+	dat[, eval(cellVars) := lapply(.SD, scale_clip), .SDcols = cellVars]
+	toHMatrix <- as.matrix(dat[, .SD, .SDcols = cellVars])
+	rownames(toHMatrix) <- dat[, communityUID]
+	mapColNamesIndex <- as.integer(gsub('SI', '', colnames(toHMatrix)))
+	mapColNames <- names(cellTypes$stromal_immune$description[mapColNamesIndex])
+	colnames(toHMatrix) <- mapColNames
+	mapColours <- cellTypes$stromal_immune$colours[mapColNamesIndex]
+	mapColours <- setNames(names(mapColours), mapColNames)
+
+	reorderSubset <- function(subset){
+		subset <- dat[TMEStructure == subset]
+		HC <- getHC(as.matrix(subset[, .SD, .SDcols = grep('SI', names(subset), value = TRUE)]), 
+			distance = 'euclidean', clustering = 'ward.D2')
+		subset <- setNames(subset[, TMEStructure], subset[, communityUID])
+		return(subset[HC$order])
+	}
+	reorderedSubsets <- mclapply(sortunique(dat[, TMEStructure]), reorderSubset, mc.cores = detectCores())
+	toHMatrix <- toHMatrix[names(unlist(reorderedSubsets)),]
+	toHMatrix <- t(toHMatrix)
+
+	cat('Is this discovery data?', isDiscovery, '\n')
+	cat('There are', ncol(toHMatrix), 'columns\n')
+
+	CellCols <- HeatmapAnnotation(
+		bar = rownames(toHMatrix),
+		col = list(bar = mapColours), 
+		show_legend = F,
+		show_annotation_name = F,
+		which = 'row'
+	)
+
+
+	structures <- getStructures()
+	setkey(structures$TME$dat, 'Structure')
+	strColours <- setNames(structures$TME$dat[, colours], structures$TME$dat[, Structure])	
+	columnAnno <- HeatmapAnnotation(str = unlist(reorderedSubsets), 
+		col = list(str = strColours), 
+		which = 'column', show_annotation_name = FALSE,
+		show_legend = FALSE
+	)
+	columnLabels <- setNames(structures$TME$dat[, Label], structures$TME$dat[, Structure])	
+
+	col_levs <- 19
+	sval <- -2; eval <- 2
+	cols <- viridisLite::magma(col_levs)
+	distance <- abs((eval - sval)) / (col_levs - 1)
+	range <- seq(sval, eval, distance)
+	hmcols <- circlize::colorRamp2(range, cols)
+	legend_ti <- 'z score'
+	thin_line <- gpar(lwd = 0.5)
+	labsi <- gpar(fontsize = 15)
+	legend_ti <- "z-score"
+	breaks <- c(sval, 0, eval)
+
+	cm <- ColorMapping(name = legend_ti,
+	    col_fun = hmcols)
+
+	hmlegend <- list(
+		object = cm, 
+		# at = breaks, 
+		legend_height = unit(20, 'mm'),
+		grid_width = unit(3, 'mm'),
+		title_gp = labsi,
+		labels_gp = labsi,
+		legend_gp = gpar(lwd = 0.1),
+		border = rgb(0,0,0, alpha = 0)
+	)
+
+	rowLabels <- sapply(rownames(toHMatrix), TeX)
+	# rowLabels[16] <- expression(paste('M', Phi, ' & granulocytes'))
+	fontSize <- 22
+
+	hm <- Heatmap(toHMatrix,
+		col = hmcols,
+		column_split = unlist(reorderedSubsets),
+		column_gap = unit(2.5, 'mm'),
+		row_labels = unlist(rowLabels),
+		column_title = sapply(columnLabels, latex2exp::TeX),
+		column_title_side = "bottom",
+		row_title_gp = gpar(fontsize = fontSize),
+		column_title_gp = gpar(fontsize = fontSize),
+		column_title_rot = -90,
+		row_names_side = 'left',
+		left_annotation = CellCols,
+		row_dend_side = 'right',
+		column_dend_side = 'bottom',
+		show_row_names = T,
+		show_column_names = F,
+		cluster_columns = F,
+		cluster_rows = T,
+		show_row_dend = F,
+		show_column_dend = F,
+		top_annotation = columnAnno,
+		bottom_annotation = columnAnno,
+		row_names_gp = gpar(fontsize = fontSize),
+		row_dend_gp = thin_line,
+		column_dend_gp = thin_line,
+		heatmap_legend_param = hmlegend,
+		raster_device = 'png',
+		raster_quality = 25,
+		heatmap_height = unit(20, 'cm')
+	)
+
+	if(is.null(height)){
+		w <- 20; h <- 12
+		if(is.null(fileToSave)) pdf('test.pdf', width = w, height = h)
+		else pdf(fileToSave, width = w, height = h)	
+		draw(hm)
+		dev.off()
+	}
+	return(hm)
+
+}
+
+DiscovHM <- toHM(TMEStructures[(isDiscovery)], isDiscovery = TRUE, 
+	fileToSave = file.path(here('output/TMEStrDiscoveryHM.pdf')))
+
+ValHM <- toHM(TMEStructures[!(isDiscovery)], isDiscovery = FALSE, 
+	fileToSave = file.path(here('output/TMEStrValidationHM.pdf')))
+
+combined <- DiscovHM + ValHM 
+pdf(file.path(here('output/combinedTMEStrHM.pdf')), width = 20, height = 12)
+draw(combined)
+dev.off()
+
+# Clean intermediate results
+rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+
+```
+
+## Visualization: figure 4d counts and diversity
+
+```{r plot 4d}
+library(vegan)
+source(here("UtilityFunctions.R"))
+
+communitiesIDs <- communitiesResult[,c('ImageNumber', 'from', 'to', 'communities_stromal')]
+communitiesIDs <- communitiesIDs[!is.na(communities_stromal)]
+setnames(communitiesIDs, 'communities_stromal', 'communityID')
+communityTMEMapping <- here('scratch/TMEStructures.fst')
+colstokeep <- read_fst(communityTMEMapping, as.data.table = T, from = 1, to = 1)
+communityTMEMapping <- read_fst(communityTMEMapping, as.data.table = T,
+	columns = grep('SI', names(colstokeep), invert = TRUE, value = TRUE))
+structures <- getStructures()
+structures$TME$dat$Structure <- as.character(structures$TME$dat$Structure)
+communityTMEMapping <- merge(x = communityTMEMapping, y = structures$TME$dat, 
+	by.x = 'TMEStructure', by.y = 'Structure')
+
+oldNames <- c('Label', 'colours', 'print_order')
+newNames <- paste0('TMEStr', oldNames)
+setnames(communityTMEMapping, oldNames, newNames)
+communityIDs <- merge(x = communitiesIDs, y = communityTMEMapping, 
+	by= c('ImageNumber', 'communityID')) 
+setkeyv(communityIDs, c('ImageNumber', 'communityID', 'from'))
+
+nwProperties <- copy(NetworkProperties)
+nwProperties <- nwProperties[['stroma']]
+setnames(nwProperties, 'communities_stromal', 'communityID')
+communityIDs <- merge(x = communityIDs, y = nwProperties[, .(ImageNumber, communityID, nVertices)], 
+	by = c('ImageNumber', 'communityID')) 
+
+cellDat <- getCells()[(isTumour)]
+communityIDs <- merge(x = communityIDs, y = cellDat, 
+	by.x = c('ImageNumber', 'from'), by.y = c('ImageNumber', 'ObjectNumber')) 
+communityIDs[, uniqueCell := (seq_len(.N) == 1L), by = .(ImageNumber, communityID, from)]
+communityIDs[(uniqueCell), shannonDiversity := vegan::diversity(TMEStrprint_order), by = .(communityUID)]
+
+toPlot <- communityIDs[, .SD[1], by = communityUID]
+toPlot[, TotalCommunities := .N, by = TMEStructure]
+toPlot[, medianNVertices := median(as.numeric(nVertices)), by = TMEStructure]
+toPlot <- toPlot[order(medianNVertices, TMEStructure)]
+toPlot[, yaxis := as.integer(seq_len(.N) == 1L), by = TMEStructure]
+toPlot[, yaxis := cumsum(yaxis)]
+toPlot <- toPlot[order(yaxis, decreasing = TRUE)]
+
+toPlot[, yaxisRev := as.integer(seq_len(.N) == 1L), by = yaxis]
+toPlot[, yaxisRev := cumsum(yaxisRev)]
+toPlot[, yaxisRev := factor(yaxisRev, 
+	levels = unique(yaxisRev), labels = unique(TMEStrLabel), ordered = TRUE)]
+toPlot <- melt(toPlot, id.vars = c('yaxisRev', 'communityUID', 'TMEStrcolours', 'TotalCommunities'), 
+	measure.vars = c('nVertices', 'shannonDiversity'))
+toPlot[, variable := ifelse(grepl('nVertices', variable), 'Cell count', 'Shannon diversity')]
+
+toPlot$yaxisRev <- factor(toPlot$yaxisRev,
+    levels = c("Suppressed expansion","TLS-like","Vascular stroma", "PDPN^{+} active stroma", "Active IR",
+               "FSP1^{+} enriched","Granulocyte enriched","APC enriched","CD8^{+} & macrophages","Active stroma"),ordered = TRUE)
+
+lineW <- 0.2
+box <- ggplot() +
+	geom_boxplot(data = toPlot, 
+		aes(x = yaxisRev, y = value, fill = TMEStrcolours),
+		outlier.size = 0.1, size = lineW) +
+	scale_fill_identity() +
+	scale_x_discrete(labels = sortunique(toPlot$yaxisRev)) +
+	facet_grid(cols = vars(variable), 
+		scales = 'free', space = 'fixed') + 
+	theme_prj(base_line_size = lineW) +
+	theme(axis.title.x = element_blank(),
+		plot.margin = unit(c(0,0,0,0), 'npc')) +
+	coord_flip() +
+	labs(x = 'TME structure')
+
+toPlot[variable == 'Cell count', countfacet := factor(1, levels = 1, 
+	labels = expression(paste(italic('n'), 'communities')), ordered = TRUE)]
+
+counts <- ggplot(data = toPlot[, .SD[1], by = yaxisRev]) +
+	geom_col(aes(x = yaxisRev, y = TotalCommunities), fill = 'lightgrey') +
+	geom_text(aes(x = yaxisRev, y = TotalCommunities, label = TotalCommunities),
+		hjust = 0, nudge_y = 50) +
+	theme_prj(base_line_size = lineW) +
+	theme(axis.text.y = element_blank(),
+		axis.text.x = element_text(colour = 'white'),
+		axis.title = element_blank(),
+		axis.line.y = element_blank(),
+		axis.ticks.y = element_blank(),
+		axis.line.x = element_line(colour = 'white'),
+		axis.ticks.x = element_line(colour = 'white'),
+		plot.margin = unit(c(0,0.4,0,0), 'npc')) +
+	coord_flip(clip = 'off') +
+	scale_x_discrete(labels = sortunique(toPlot$yaxisRev)) +
+	scale_y_continuous(expand = c(0,0), limits = c(0,4000)) +
+	facet_grid(cols = vars(countfacet), labeller = label_parsed) 
+
+
+p <- plot_grid(box, counts, nrow = 1, rel_widths = c(1, 0.4))
+save_plot(here('output/TMEStructuresVCellCountShannonBox.pdf'), p,
+	base_height = 1.9, base_width = 5.4)
+
+# Clean intermediate results
+rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+source(here("UtilityFunctions.R"))
+```
+
+
+
+## Visualization: figure 4f vertex degree
+
+```{r plot 4f}
+library('igraph')
+
+cellNeighbours <- getCellNeighbours()
+cellNeighbours <- cellNeighbours[, .SD, 
+	.SDcols = setdiff(names(cellNeighbours), c('metabric_id', 'TMEStructure', 'communityID', 'isDiscovery'))]
+communitiesIDs <- communitiesResult[,c('ImageNumber', 'from', 'to', 'communities_stromal')]
+communitiesIDs <- communitiesIDs[!is.na(communities_stromal)]
+setnames(communitiesIDs, 'communities_stromal', 'communityID')
+communityTMEMapping <- here('scratch/TMEStructures.fst')
+colstokeep <- read_fst(communityTMEMapping, as.data.table = T, from = 1, to = 1)
+communityTMEMapping <- read_fst(communityTMEMapping, as.data.table = T,
+	columns = grep('SI', names(colstokeep), invert = TRUE, value = TRUE))
+communityIDs <- merge(x = communitiesIDs, y = communityTMEMapping, 
+	by = c('ImageNumber', 'communityID')) 
+cellNeighbours <- merge(x = cellNeighbours, y = communityIDs, 
+	by = c('ImageNumber', 'from', 'to')) 
+
+mkDegrees <- function(graph_dt){
+	degrees <- graph_from_data_frame(graph_dt[, .(from, to)], directed = F)
+	degrees <- simplify(degrees)
+	nVertices <- length(V(degrees))
+	degrees <- degree(degrees, loops = F)
+	degrees_dt <- data.table(from = as.integer(names(degrees)), 
+		degree = degrees, nVertices = nVertices)
+	graph <- merge(x = graph_dt, y = degrees_dt, by = 'from') 
+	return(graph)
+}
+
+Degrees <- split(cellNeighbours, by = 'communityUID')
+Degrees <- mclapply(Degrees, mkDegrees, mc.cores = detectCores())
+Degrees <- rbindlist(Degrees)
+stopifnot(Degrees[is.na(degree), .N] == 0L)
+maxDegreeClip <- 9
+Degrees[, degree := ifelse(degree > maxDegreeClip, maxDegreeClip, degree)]
+Degrees[, totalDegree := .N, by = .(TMEStructure, degree)]
+Degrees[, proportion := .N / totalDegree, by = .(TMEStructure, degree, to_meta_description)]
+
+toPlot <- Degrees[, .SD[1], by = .(TMEStructure, degree, to_meta_description)]
+cellPhenotypes <- get_phenotypes()
+filllabs <- names(cellPhenotypes$stromal_immune$description)
+fillcols <- cellPhenotypes$stromal_immune$colours
+toPlot[, fillColOrder := factor(to_print_order, 
+	levels = sortunique(to_print_order), 
+	labels = names(fillcols),  ordered = TRUE)]
+
+structures <- getStructures()
+toMapVar <- structures$TME$dat[order(print_order)]
+mapVar <- setNames(toMapVar[, print_order], toMapVar[,Label])
+toPlot[, TMEStructureNo := mapVar[TMEStructure]]
+facetlabs <- unlist(lapply(names(mapVar), TeX), use.names = F)
+printMap <- setNames(structures$TME$dat[,print_order], structures$TME$dat[,Structure])
+toPlot[, facet_by := printMap[as.character(TMEStructure)]]
+toPlot[, facet_by := factor(facet_by, 
+	levels = as.integer(mapVar), labels = facetlabs, ordered = TRUE)]
+
+xbreaks <- toPlot[, sortunique(degree)]
+xlabs <- as.character(xbreaks)
+xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
+legend_colours <- names(fillcols)
+# legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
+legend_labels <- filllabs
+
+mkStackedArea <- function(dat){
+	p <- ggplot() +
+	geom_area(data = dat, 
+		aes(x = degree, y = proportion, fill = fillColOrder), size = 1) +
+	scale_y_continuous(expand = c(0,0), breaks = c(0,1), labels = c('0', '1')) +
+	scale_x_continuous(expand = c(0,0), breaks = xbreaks, labels = xlabs) +
+	scale_fill_identity(
+		'Cell phenotype',
+		breaks = legend_colours,
+		labels = legend_labels,
+		guide = 'legend'
+	) +		
+	theme_prj(base_line = 0.25) +
+	facet_wrap(vars(facet_by), nrow = 2) +
+	labs(x = 'Vertex degree (cell interactions)', y = 'Proportion') +
+	guides(fill = guide_legend(title.position = 'top', ncol = 1, 
+		keywidth = 0.5, keyheight = 0.5, label.position = 'left', label.hjust = 1)) +
+	theme(
+		axis.text = element_text(size = 5),
+		strip.background = element_blank(), 
+		strip.text = element_text(size = 6.25, margin = margin(t = 0, b = 0)),
+		panel.spacing = unit(1, 'mm'),
+		legend.position = 'left', legend.title.align = 1)
+	return(p)
+}
+
+plotOut <- mkStackedArea(dat = toPlot)
+save_plot(here('output/TMEStructuresVertexDegreeStackedArea.pdf'), plotOut, base_width = 7.35)
+
+# cellCentric # Ext Data 7
+cellDegrees <- getCellNeighbours()
+cellDegrees <- cellDegrees[from_is_epithelial == to_is_epithelial]
+cellDegrees <- cellDegrees[!(from_is_epithelial)]
+cellDegrees[, degree := .N, by = .(ImageNumber, from)]
+
+maxDegreeClip <- 9
+cellDegrees[, degree := ifelse(degree > maxDegreeClip, maxDegreeClip, degree)]
+
+cellDegrees[, totalDegree := .N, by = .(from_meta_description, degree)]
+cellDegrees[, proportion := .N / totalDegree, by = .(from_meta_description, degree, to_meta_description)]
+
+toPlot <- cellDegrees[, .SD[1], by = .(from_meta_description, degree, to_meta_description)]
+cellPhenotypes <- get_phenotypes()
+filllabs <- names(cellPhenotypes$stromal_immune$description)
+fillcols <- names(cellPhenotypes$stromal_immune$colours)
+toPlot[, fillColOrder := factor(to_print_order, 
+	levels = sortunique(to_print_order), 
+	labels = fillcols,  ordered = TRUE)]
+
+facetlabs <- names(cellPhenotypes$stromal_immune$description)
+# facetlabs <- sapply(facetlabs, TeX)
+# facetlabs[9] <- expression(paste('M', Phi, ' & granulocytes'))
+toPlot[, facet_by := factor(from_print_order, 
+	levels = sortunique(from_print_order), labels = facetlabs, ordered = TRUE)]
+
+xbreaks <- toPlot[, sortunique(degree)]
+xlabs <- as.character(xbreaks)
+xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
+legend_colours <- fillcols
+legend_labels <- unlist(filllabs, use.names = FALSE)
+
+plotOut <- mkStackedArea(dat = toPlot)
+save_plot(here('output/TMECellCentricVertexDegreeStackedArea.pdf'), plotOut, base_width = 11)
+
+#Clean intermediate results
+rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+```
+
+
