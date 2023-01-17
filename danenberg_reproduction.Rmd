@@ -41,14 +41,14 @@ n_threads <- parallel::detectCores()
 ```
 
 ## Data discovery
-We reproduce the visualization of the cell phenotype counts and proportions as shown in extended figure 2 to show that the input datasets are the same.
+To visualize the input datasets, we reproduce extended figure 2, showing cell type counts and proportions.
 
 ```{r data discovery}
 cell_dat <- cells[, .(ImageNumber, ObjectNumber, is_epithelial, meta_description,
 		print_order, meta_id, colours)]
 
 # Get rectangularised proportion (or count) data
-# Hierarchical cluster order by count data
+# Hierarchical cluster per image, order by count data
 count_dat <- cell_dat[, ncells := .N, by = .(ImageNumber, meta_description)] 
 count_dat <- dcast(count_dat, ImageNumber ~ meta_description, value.var = 'ncells')
 hc_order_count <- getHC(count_dat[, -c('ImageNumber'), with = F])	
@@ -84,6 +84,7 @@ cell_dat$colours <-
 	factor(cell_dat$colours, levels = legend_colours, 
 		ordered = T)
 
+# Styling function
 mkplot <- function(proportion = F){
 	
 	if (proportion){
@@ -165,11 +166,11 @@ ggsave(outfile, p, height = 7, width = 8)
 
 
 ## Community detection
-The TME is represented as a graph to use the community-detection algorithm to find densely connected cell clusters.
+The TME is represented as a graph to find densely connected cell clusters using a community-detection algorithm. number of edges, number of vertices, diameter, density, transitvity and assortativity is calculated for the resulting communities.
 
 ```{r community detection and property calculation}
 
-# Run communiy-detection algorithm
+# Communiy-detection algorithm using random walks
 getCommunities <- function(dt){
 	g <- graph_from_data_frame(dt, directed = F)
 	subgraphs <- cluster_walktrap(g)
@@ -179,7 +180,7 @@ getCommunities <- function(dt){
 	return(data.table(communities))
 }
 
-# Retrieve network properties of individual communties for later analyses
+# Retrieve network properties of individual communities for later analyses
 getNetworkProperties <- function(dt){
 	g <- graph_from_data_frame(dt, directed = F)
 	# n of edges
@@ -198,6 +199,7 @@ getNetworkProperties <- function(dt){
 	return(dtout)
 }
 
+# Compute assortativity of subgraphs
 getAssortativity <- function(dt){
 	vertex_attributes <- melt(dt, id.var = names(dt)[3], value.name = 'vertex')
 	vertex_attributes <- vertex_attributes[, .SD[1], 
@@ -211,8 +213,10 @@ getAssortativity <- function(dt){
 getSubgraphs <- function(image, dt){
 	image <- dt[ImageNumber == image]
 	graphCols <- c('from', 'to')
+	# Find communities
 	communityCols <- 'communities'
 	image[,  eval(communityCols) := getCommunities(.SD), .SDcols = graphCols]
+	# Compute properties
 	properties <- c('nEdges', 'nVertices', 'diameter', 
 		'distance', 'density', 'transitivity')
 	image[, eval(properties) := getNetworkProperties(.SD), 
@@ -249,7 +253,7 @@ stromal <- cellNeighbours[(from_is_epithelial == F & to_is_epithelial == F)
 	& (from_is_vascular == F & to_is_vascular == F)]
 stromal <- mkGraphOut(stromal, 'stromal')
 
-# two datasets out
+# Merge two results
 # 1. Communities ids
 toMerge <- function(dt){
 	communityCol <- grep('communities', names(dt), value = T)
@@ -279,15 +283,15 @@ NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
 communities <- copy(allOut)
 NetworkProperties <- copy(NetworkLevelDts)
 rm(list = setdiff(ls(), c('communities', 'NetworkProperties')))
-source(here("UtilityFunctions.R"))
 ```
 
 
 ## Cluster communities
-For the detected communities, connectivity profiles are computed (phenotype composition and vertex degree).
+connectivity profiles (phenotype composition and vertex degree) are computed for the resulting communities.
 
 ```{r setup clustering}
 # Retrieve input datasets
+source(here("UtilityFunctions.R"))
 cells <- getCells()
 cellNeighbours <- getCellNeighbours()
 phenotypes <- get_phenotypes()
@@ -308,7 +312,9 @@ setkeyv(communities, c('ImageNumber', 'communityID')) #mk unique community id
 communities[, communityUID := as.integer(seq_len(.N) == 1L), by = .(ImageNumber, communityID)]
 communities[, communityUID := cumsum(communityUID)]
 communities <- merge(x = communities, y = cellNeighbours, by = c('ImageNumber', 'from', 'to'))
+# Compute total interactions of a community
 communities[, TotalInteractions := .N, by = communityUID]
+# Compute interactions per cell type
 communities[, nInteractions := asinh(.N), by = .(communityUID, to_meta_id)]
 toCluster <- dcast(communities[, .SD[1], by = .(communityUID, to_meta_id)], 
 	ImageNumber + communityID + communityUID + metabric_id + isDiscovery + TotalInteractions ~ to_meta_id, 
@@ -332,6 +338,7 @@ mkCommunityModules <- function(Communities){
 	Communities <- Communities[TotalInteractions > minCount]
 	Communities[, id := seq_len(.N)]
 
+	# Hierarchical clustering
 	getHCGroups <- function(dt, k) {
 		dmat <- dist(dt, method = 'canberra')
 		hc <- hclust(dmat, method = 'ward.D2')
@@ -358,21 +365,27 @@ setnames(TMEStructuresDiscov, 'CommunityModuleID', 'TMEStructure')
 Reproducibility is validated by training a random forest classifier on connectivity profiles.
 
 ```{r validation}
+library(diffdf)
+
 RFCCols <- c('TMEStructure', grep('SI', names(TMEStructuresDiscov), value = TRUE))
+#Train random forest model on cell type proportions
 RFCModel <- randomForest::randomForest(formula = as.factor(TMEStructure) ~ ., 
 	data = TMEStructuresDiscov[, .SD, .SDcols = RFCCols],
 	importance = TRUE, mtry = 12)
 RFCModel
 
+#Select validation set
 toClusterValidation <- toCluster[!(isDiscovery)][TotalInteractions > minCount]
 oldNames <- grep('SI', names(toClusterValidation), value = TRUE)
 newNames <- gsub(' ', '', oldNames)
 setnames(toClusterValidation, oldNames, newNames)
+# Predict community label
 predictions <- predict(RFCModel, 
 	toClusterValidation[, .SD, 
 	.SDcols = grep('SI', names(toClusterValidation), value = TRUE)])
 toClusterValidation[, TMEStructure := predictions] 
 
+#Combine datasets
 TMEStructuresDiscov[, isDiscovery := TRUE]
 toClusterValidation[, isDiscovery := FALSE]
 TMEStructures <- rbindlist(list(TMEStructuresDiscov, toClusterValidation))
@@ -386,25 +399,42 @@ checkIDs <- na.omit(checkIDs)
 setkeyv(checkIDs, names(checkIDs))
 setkeyv(TMEStructures, names(checkIDs))
 
-library(diffdf)
-
-# Print differences
+# Print wrongly predicted communities
 issues <- diffdf(TMEStructures[, .SD, .SDcols = names(checkIDs)], checkIDs)
-TMEStructures[issues$VarDiff_TMEStructure$..ROWNUMBER..,]
+false_discovery <- TMEStructures[issues$VarDiff_TMEStructure$..ROWNUMBER..,]
+false_discovery$predict_id <- as.character(issues$VarDiff_TMEStructure$COMPARE)
+false_discovery$TMEStructure <- as.character(false_discovery$TMEStructure)
+false_discovery <- false_discovery %>% rename("true_id" = "TMEStructure")
 
+false_discovery[,23:24]
+
+structures <- getStructures()
+
+cell_labels <- data.frame(as.character(structures$TME$dat$Structure), as.character(structures$TME$dat$Label))
+setnames(cell_labels, c("id", "structure"))
+
+
+false_discovery <- left_join(false_discovery, cell_labels, by=c("true_id" = "id"))
+false_discovery <- false_discovery %>% rename("true_structure" = "structure")
+false_discovery <- left_join(false_discovery, cell_labels, by=c("predict_id" = "id"))
+false_discovery <- false_discovery %>% rename("predict_structure" = "structure")
+
+library("caret")
+confusionMatrix(as.factor(false_discovery$true_structure), as.factor(false_discovery$predict_structure))
 ```
-
-Aggregate clusters per patient
+The resulting communities are aggregated per patient
 
 ```{r cluster aggregation}
 
 ptLevel <- TMEStructures[, .(ImageNumber, communityID, communityUID, TMEStructure)]
+#Select TME communities
 communitiesAll <- communitiesResult[, .(ImageNumber, from, to, communities_stromal)][!is.na(communities_stromal)]
 setnames(communitiesAll, 'communities_stromal', 'communityID')
 ptLevel <- merge(x = communitiesAll, y = ptLevel, by = c('ImageNumber', 'communityID'))
 IDs <- getCells()[, .(ImageNumber, metabric_id)]
 IDs <- IDs[, .SD[1], by = .(ImageNumber)]
-ptLevel <- merge(x = ptLevel, y = IDs, by = 'ImageNumber') 
+ptLevel <- merge(x = ptLevel, y = IDs, by = 'ImageNumber')
+#Compute interactions (vertex degree)
 ptLevel[, TotalInteractions := .N, by = metabric_id]
 ptLevel[,  nInteractionsPerStructure := .N, by = .(metabric_id, TMEStructure)]
 ptLevel <- 
@@ -422,7 +452,7 @@ write_fst(ptLevel, outfile, compress = 100)
 
 #Clean intermediate results
 rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
-source(here("UtilityFunctions.R"))
+
 ```
 
 
@@ -431,6 +461,7 @@ source(here("UtilityFunctions.R"))
 ```{r heatmap 4b}
 library(ComplexHeatmap)
 library(latex2exp)
+source(here("UtilityFunctions.R"))
 
 toHM <- function(dat, fileToSave, height = NULL, isDiscovery) {
 	cellTypes <- get_phenotypes()
@@ -466,7 +497,6 @@ toHM <- function(dat, fileToSave, height = NULL, isDiscovery) {
 		show_annotation_name = F,
 		which = 'row'
 	)
-
 
 	structures <- getStructures()
 	setkey(structures$TME$dat, 'Structure')
@@ -517,7 +547,7 @@ toHM <- function(dat, fileToSave, height = NULL, isDiscovery) {
 		column_title_side = "bottom",
 		row_title_gp = gpar(fontsize = fontSize),
 		column_title_gp = gpar(fontsize = fontSize),
-		column_title_rot = -90,
+		column_title_rot = 90,
 		row_names_side = 'left',
 		left_annotation = CellCols,
 		row_dend_side = 'right',
@@ -552,11 +582,11 @@ toHM <- function(dat, fileToSave, height = NULL, isDiscovery) {
 
 DiscovHM <- toHM(TMEStructures[(isDiscovery)], isDiscovery = TRUE, 
 	fileToSave = file.path(here('output/TMEStrDiscoveryHM.pdf')))
-
-ValHM <- toHM(TMEStructures[!(isDiscovery)], isDiscovery = FALSE, 
+# 
+ValHM <- toHM(TMEStructures[!(isDiscovery)], isDiscovery = FALSE,
 	fileToSave = file.path(here('output/TMEStrValidationHM.pdf')))
 
-combined <- DiscovHM + ValHM 
+combined <- DiscovHM + ValHM
 pdf(file.path(here('output/combinedTMEStrHM.pdf')), width = 20, height = 12)
 draw(combined)
 dev.off()
