@@ -36,6 +36,7 @@ set.seed(projectSeed)
 cells <- getCells()
 cellNeighbours <- getCellNeighbours()
 phenotypes <- get_phenotypes()
+structures <- getStructures()
 images <- unique(cellNeighbours[['ImageNumber']])
 n_threads <- parallel::detectCores()
 ```
@@ -458,6 +459,8 @@ rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructur
 
 ## Visualization: figure 4b Heatmap
 
+
+
 ```{r heatmap 4b}
 library(ComplexHeatmap)
 library(latex2exp)
@@ -650,8 +653,9 @@ toPlot <- melt(toPlot, id.vars = c('yaxisRev', 'communityUID', 'TMEStrcolours', 
 toPlot[, variable := ifelse(grepl('nVertices', variable), 'Cell count', 'Shannon diversity')]
 
 toPlot$yaxisRev <- factor(toPlot$yaxisRev,
-    levels = c("Suppressed expansion","TLS-like","Vascular stroma", "PDPN^{+} active stroma", "Active IR",
-               "FSP1^{+} enriched","Granulocyte enriched","APC enriched","CD8^{+} & macrophages","Active stroma"),ordered = TRUE)
+    levels = c("Suppressed expansion", "TLS-like", "Vascular stroma", "$PDPN^{+}$ active stroma","Active IR",
+               "$FSP1^{+}$ enriched$", "Granulocyte enriched", "APC enriched",  "$CD8^{+}$ & $macrophages$",
+                                   "Active stroma"),ordered = TRUE)
 
 lineW <- 0.2
 box <- ggplot() +
@@ -659,7 +663,7 @@ box <- ggplot() +
 		aes(x = yaxisRev, y = value, fill = TMEStrcolours),
 		outlier.size = 0.1, size = lineW) +
 	scale_fill_identity() +
-	scale_x_discrete(labels = sortunique(toPlot$yaxisRev)) +
+	scale_x_discrete(labels = sapply(as.character(toPlot$yaxisRev), TeX)) +
 	facet_grid(cols = vars(variable), 
 		scales = 'free', space = 'fixed') + 
 	theme_prj(base_line_size = lineW) +
@@ -685,9 +689,9 @@ counts <- ggplot(data = toPlot[, .SD[1], by = yaxisRev]) +
 		axis.ticks.x = element_line(colour = 'white'),
 		plot.margin = unit(c(0,0.4,0,0), 'npc')) +
 	coord_flip(clip = 'off') +
-	scale_x_discrete(labels = sortunique(toPlot$yaxisRev)) +
+	scale_x_discrete(labels = sapply(as.character(toPlot$yaxisRev), TeX)) +
 	scale_y_continuous(expand = c(0,0), limits = c(0,4000)) +
-	facet_grid(cols = vars(countfacet), labeller = label_parsed) 
+	facet_grid(cols = vars(countfacet)) 
 
 
 p <- plot_grid(box, counts, nrow = 1, rel_widths = c(1, 0.4))
@@ -696,7 +700,6 @@ save_plot(here('output/TMEStructuresVCellCountShannonBox.pdf'), p,
 
 # Clean intermediate results
 rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
-source(here("UtilityFunctions.R"))
 ```
 
 
@@ -705,6 +708,7 @@ source(here("UtilityFunctions.R"))
 
 ```{r plot 4f}
 library('igraph')
+source(here("UtilityFunctions.R"))
 
 cellNeighbours <- getCellNeighbours()
 cellNeighbours <- cellNeighbours[, .SD, 
@@ -763,8 +767,8 @@ xbreaks <- toPlot[, sortunique(degree)]
 xlabs <- as.character(xbreaks)
 xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
 legend_colours <- names(fillcols)
-# legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
-legend_labels <- filllabs
+legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
+# legend_labels <- filllabs
 
 mkStackedArea <- function(dat){
 	p <- ggplot() +
@@ -816,7 +820,7 @@ toPlot[, fillColOrder := factor(to_print_order,
 	labels = fillcols,  ordered = TRUE)]
 
 facetlabs <- names(cellPhenotypes$stromal_immune$description)
-# facetlabs <- sapply(facetlabs, TeX)
+facetlabs <- sapply(facetlabs, TeX)
 # facetlabs[9] <- expression(paste('M', Phi, ' & granulocytes'))
 toPlot[, facet_by := factor(from_print_order, 
 	levels = sortunique(from_print_order), labels = facetlabs, ordered = TRUE)]
@@ -825,7 +829,8 @@ xbreaks <- toPlot[, sortunique(degree)]
 xlabs <- as.character(xbreaks)
 xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
 legend_colours <- fillcols
-legend_labels <- unlist(filllabs, use.names = FALSE)
+legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
+
 
 plotOut <- mkStackedArea(dat = toPlot)
 save_plot(here('output/TMECellCentricVertexDegreeStackedArea.pdf'), plotOut, base_width = 11)

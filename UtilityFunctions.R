@@ -257,6 +257,19 @@ get_phenotypes <- function(TeX_to_expression = F){
   types <- c(ep_phenos, str_phenos)
   out <- lapply(types, get_lab_vec)
   names(out) <- c('epithelial', 'stromal_immune')
+  
+  cell_labels_correction <-  c('$CD8^{+}$ T cells$','$CD4^{+}$ T cells$','$CD4^{+}$ T cells & APCs$', '$T_{Reg}$ & $T_{Ex}$', 'B cells',
+                               '$CD38^{+}$ lymphocytes$','$CD57^{+}$', 'Macrophages', 'Macrophages & granulocytes', 'Granulocytes',
+                               '$Fibroblasts$ $FSP1^{+}$','Fibroblasts', 'Myofibroblasts', 'Myofibroblasts $PDPN^{+}$',
+                               'Endothelial','$Ki67^{+}$')
+  names(out$stromal_immune$description) <- cell_labels_correction
+  
+  ep_cell_labels_correction <- c("$CK8-18^{hi}CXCL12^{hi}$", "$CK8-18^{+}$ $ER^{hi}$", "$CK8-18^{hi}ER^{lo}$", "$CK^{+}$ $CXCL12^{+}$",
+                                 "$ER^{hi}CXCL12^{+}$", "$CK^{med}ER^{lo}$", "$CK^{lo}ER^{med}$", "$CK^{lo}ER^{lo}$", "$HER2^{+}$",
+                                 "Basal", "$CD15^{+}$", "$Ep$ $CD57^{+}$", "$MHC^{hi}CD15^{+}$", "$MHC$ $I^{hi}CD57^{+}$",
+                                 "$MHC$ $I$ & $II^{hi}$", "$Ep$ K$i67^{+}$")
+  names(out$epithelial$description) <- ep_cell_labels_correction
+  
   return(out)
 }
 
@@ -340,11 +353,18 @@ getPtLevelTMEStructures <- function(){
 getStructures <- function(){
   file <- here('DATA/TMEStructuresAnnotation.csv')
   dat <- fread(file)
+  
+  structure_labels_correction <- c("Suppressed expansion", "APC enriched", "TLS-like", "Active IR", "$FSP1^{+}$ enriched$",
+                                   "Active stroma", "$PDPN^{+}$ active stroma", "$CD8^{+}$ & $macrophages$", "Granulocyte enriched",
+                                   "Vascular stroma")
+  dat$Label  <- structure_labels_correction
+  
   setkey(dat, 'print_order')
   colours <- dat[, colours]
   names(colours) <- dat[, print_order]
   labs <- dat[, Label]
   names(labs) <- dat[, print_order]
+
 
   return(
     list(
