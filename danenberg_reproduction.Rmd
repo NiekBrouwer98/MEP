@@ -673,7 +673,7 @@ box <- ggplot() +
 	labs(x = 'TME structure')
 
 toPlot[variable == 'Cell count', countfacet := factor(1, levels = 1, 
-	labels = expression(paste(italic('n'), 'communities')), ordered = TRUE)]
+	labels = expression('n communities'), ordered = TRUE)]
 
 counts <- ggplot(data = toPlot[, .SD[1], by = yaxisRev]) +
 	geom_col(aes(x = yaxisRev, y = TotalCommunities), fill = 'lightgrey') +
@@ -757,7 +757,8 @@ structures <- getStructures()
 toMapVar <- structures$TME$dat[order(print_order)]
 mapVar <- setNames(toMapVar[, print_order], toMapVar[,Label])
 toPlot[, TMEStructureNo := mapVar[TMEStructure]]
-facetlabs <- unlist(lapply(names(mapVar), TeX), use.names = F)
+labels <- structures$TME$dat$Label
+facetlabs <- unlist(lapply(labels, TeX), use.names = F)
 printMap <- setNames(structures$TME$dat[,print_order], structures$TME$dat[,Structure])
 toPlot[, facet_by := printMap[as.character(TMEStructure)]]
 toPlot[, facet_by := factor(facet_by, 
@@ -768,7 +769,6 @@ xlabs <- as.character(xbreaks)
 xlabs <- gsub(as.character(maxDegreeClip), paste0(maxDegreeClip, '+'), xlabs)
 legend_colours <- names(fillcols)
 legend_labels <- unlist(lapply(filllabs, TeX), use.names = FALSE)
-# legend_labels <- filllabs
 
 mkStackedArea <- function(dat){
 	p <- ggplot() +
@@ -798,7 +798,9 @@ mkStackedArea <- function(dat){
 
 plotOut <- mkStackedArea(dat = toPlot)
 save_plot(here('output/TMEStructuresVertexDegreeStackedArea.pdf'), plotOut, base_width = 7.35)
+```
 
+```{r}
 # cellCentric # Ext Data 7
 cellDegrees <- getCellNeighbours()
 cellDegrees <- cellDegrees[from_is_epithelial == to_is_epithelial]
@@ -815,14 +817,14 @@ toPlot <- cellDegrees[, .SD[1], by = .(from_meta_description, degree, to_meta_de
 cellPhenotypes <- get_phenotypes()
 filllabs <- names(cellPhenotypes$stromal_immune$description)
 fillcols <- names(cellPhenotypes$stromal_immune$colours)
-toPlot[, fillColOrder := factor(to_print_order, 
-	levels = sortunique(to_print_order), 
+toPlot[, fillColOrder := factor(to_print_order,
+	levels = sortunique(to_print_order),
 	labels = fillcols,  ordered = TRUE)]
 
 facetlabs <- names(cellPhenotypes$stromal_immune$description)
-facetlabs <- sapply(facetlabs, TeX)
+facetlabs <- unlist(lapply(facetlabs, TeX), use.names = FALSE)
 # facetlabs[9] <- expression(paste('M', Phi, ' & granulocytes'))
-toPlot[, facet_by := factor(from_print_order, 
+toPlot[, facet_by := factor(from_print_order,
 	levels = sortunique(from_print_order), labels = facetlabs, ordered = TRUE)]
 
 xbreaks <- toPlot[, sortunique(degree)]
@@ -836,7 +838,7 @@ plotOut <- mkStackedArea(dat = toPlot)
 save_plot(here('output/TMECellCentricVertexDegreeStackedArea.pdf'), plotOut, base_width = 11)
 
 #Clean intermediate results
-rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+# rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
 ```
 
 
