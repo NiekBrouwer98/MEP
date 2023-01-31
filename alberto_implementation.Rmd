@@ -9,9 +9,22 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-In this document we aim to apply the method developed by Gil-Jimenez et al. to the METABRIC breast cancer cohort. The spatial coordinates and phenotype classification of single cells is retrieved from the paper by Danenberg et al. (2022).
+In this document we apply the method developed by Gil-Jimenez et al. to the METABRIC breast cancer cohort. The spatial coordinates and phenotype classification of single cells is retrieved from the paper by Danenberg et al. (2022).
 
-```{r libraries and settings}
+```{r libraries and settings, echo=FALSE}
+# invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
+options(warn=-1)
+
+library(here)
+library(fst)
+library(data.table)
+library(ggplot2)
+library(assertthat)
+source(here("UtilityFunctions.R"))
+
+cells <- getCells()
+phenotype_list <- get_phenotypes()
+
 library(tidyverse)
 library(ggpubr)
 library(readxl)
@@ -26,49 +39,564 @@ library(car)
 library(doParallel)
 library(foreach)
 library(spatstat)
-library(raster)
+# library(raster)
 library(gridExtra)
 
+
+```
+
+## 1-NN distance copmutation
+
+```{r change labels}
+cells <- cells %>% rename(tnumber = ImageNumber)
+cells <- cells %>% rename(phenotype = meta_description)
+cells <- cells %>% rename(Xcenter = Location_Center_X)
+cells <- cells %>% rename(Ycenter = Location_Center_Y)
+
+#Data with sample number, cell index number, spatial location, phenotype and area
+cells <- cells[,c("tnumber", "ObjectNumber", "Xcenter", "Ycenter", "phenotype", "AreaShape_Area")]
+
+#For debugging we take a small subset, remove this when code is working
+cells <- cells[cells$tnumber %in% seq(1,10)]
+```
+
+```{r}
+# call cores (parallelization)
+# Comment this because of limitation on core usability in darwin
+nc <- detectCores()
+cl <- makePSOCKcluster(floor(nc / 4) )
+registerDoParallel(cl)
+```
+
+Compute all 1-NN distances
+
+```{r 1-NN distances}
+# First NNdist all-against-all phenotypes
+#' @param x Multiplex immunofluorescence coordinate dataframe (with Xcenter, Ycenter, phenotype, etc)
+#' @param phenotype1 Phenotype From
+#' @param phenotype2 Phenotype To
+distances <- function(x, phenotype1,phenotype2) {
+  # Create a point pattern
+  spdat <- ppp(
+    x = x$Xcenter,
+    y = x$Ycenter,
+    window = owin(
+      xrange = c(min(x$Xcenter), max(x$Xcenter)),
+      yrange = c(min(x$Ycenter), max(x$Ycenter))
+    ),
+    marks = x$phenotype
+  )
+  phenos <- unique(x$phenotype)
+  
+  #if phenotypes to compare are equal, then the 2nd nearest neighbour must be used, else the current point is compared to itself
+  if(phenotype1 != phenotype2){
+    res <- nncross(spdat[which(spdat$marks == phenotype1)], spdat[which(spdat$marks == phenotype2)], k = 1, what = 'dist')
+  } else {
+    res <- nncross(spdat[which(spdat$marks == phenotype1)], spdat[which(spdat$marks == phenotype2)], k = 2, what = 'dist')
+    
+  }
+  return(res)
+}
+
+# Define which phenotypes will be studied (UNIQUE CELL TYPES IN YOUR DATASET)
+# phenotypes <- unique(cells$phenotype) #All phenotypes
+phenotypes <- unique(phenotype_list$stromal_immune$pg_id_map$meta_description) #Only stromal immune phenotypes
+
+# Compute 1-NN for all combinations of samples (n=24) x phenotype FROM (n=7) x phenotype TO (n=7)
+spatresall <-
+  foreach(i = unique(cells %>% pull(tnumber)),
+          .packages = c('sp', 'spatstat'),
+          .final = function(x) setNames(x, unique(cells %>% pull(tnumber)))) %dopar% {
+            x <- cells[which(cells$tnumber == i),] 
+            phenotypes <- setNames(phenotypes, phenotypes)
+            spres <-
+              lapply(phenotypes, function(p1) {
+                lapply(phenotypes, function(p2) {
+                  distances(x, p1, p2)
+                })
+              })
+            return(spres)
+          }
+
+```
+
+Clean-up.
+
+```{r}
+#Reshape hot mess of lists of lists of lists into long data frame.
+dfl <- lapply(spatresall, function(tnr){
+  lapply(tnr, function(p1){
+    rbindlist(lapply(p1,function(Distance) {
+      as.data.frame(Distance)
+    }), idcol = "phenotype_to")
+  })
+})
+
+
+dfl2 <- lapply(dfl, function(tnr){
+  rbindlist(tnr, idcol = "phenotype_from")
+})
+
+dfl3 <- rbindlist(dfl2, idcol = "tnumber")
+
+dfl4 <- dfl3
+
+#add pseudocounts on distances for log transform AND division by 2 for conversion pixels to micrometers
+dfl4$Distance <- (dfl4$Distance + 1) / 2
+
+NNTUR <- dfl4
+
+# free up some memory. these temps are no longer needed
+rm(dfl)
+rm(dfl2)
+rm(dfl3)
+rm(dfl4)
+gc() # do garbage collection to free up memory
+```
+Group 1-NN distances in bins.
+
+```{r}
+# Explore data from 0 to 300 microns 
+# Modification for PanCK+: extend the maximum distance count further than 99 microns; do up to 300 microns
+SlidingBins_300 <- rollapply(c(0:300),5,function(y) { return(c(min(y),max(y)))})
+
+CountRows <- function(x) {
+  cnt <- apply(SlidingBins_300,1, function(y) {nrow(x[which(x$Distance >= y[1] & x$Distance <= y[2])])})
+  return(cnt)
+}
+
+BinCounts_300 <- apply(SlidingBins_300, 1, function(x) {
+  CurrentWindow <- subset(NNTUR, Distance >= x[1] & Distance <= x[2])
+  GroupCounts <- CurrentWindow %>% group_by(tnumber, phenotype_from, phenotype_to) %>%
+    dplyr::summarise(N = dplyr::n())
+  return(GroupCounts)
+})
+
+names(BinCounts_300) <- c(1:297)
+dfslides_300 <- as.data.frame.matrix(SlidingBins_300)
+dfslides_300$V3 <- apply(dfslides_300,1,mean)
+dfslides_300$ID <- row.names(dfslides_300)
+
+LongBinCounts_300 <- bind_rows(BinCounts_300, .id = "nth_window")
+# WinMean is the X coordinate of your "calculated histogram"
+LongBinCounts_300$WinMean <- dfslides_300$V3[match(LongBinCounts_300$nth_window, dfslides_300$ID)]
+# LongBinCounts_300$Response <- nabresFiltered$two_class_pa_response[match(LongBinCounts_300$tnumber, nabresFiltered$tnumber)]
+
+
+# We don't have total areas, sum all cell areas or take max and min x and y coordinate?
+areas <- left_join(aggregate(Xcenter ~ tnumber, cells, function(x) min(x)),
+                   aggregate(Xcenter ~ tnumber, cells, function(x) max(x)), by='tnumber')
+areas <- left_join(areas,aggregate(Ycenter ~ tnumber, cells, function(x) min(x)), by='tnumber')
+areas <- left_join(areas,aggregate(Ycenter ~ tnumber, cells, function(x) max(x)), by='tnumber')
+areas$area <- (areas[,3]-areas[,2])*(areas[,5]-areas[,4])*0.001 #area in mm
+
+# Match total areas of the tissue 
+LongBinCounts_300$tnumber <- as.integer(LongBinCounts_300$tnumber)
+LongBinCounts_300$Area <- LongBinCounts_300 %>%
+  left_join(data.frame(areas), by='tnumber') %>%
+  mutate(Area=area) %>% pull(Area)
+
+# N.per.mm2 is the Y coordinate of your "calculated histogram"
+# It's normalized for area
+LongBinCounts_300$N.per.mm2 <- LongBinCounts_300$N / LongBinCounts_300$Area
+
+# Function to compute Area under the curve 
+funAUC <- function(x,y){
+  id <- order(x)
+  AUC <- sum(diff(x[id]) * rollmean(y[id],2))
+  return(AUC)
+}
+
+AUCScaledSlides_300 <- LongBinCounts_300 %>%
+  dplyr::group_by(phenotype_from, phenotype_to, tnumber) %>%
+  dplyr::mutate(N.per.mm2.scaled = N.per.mm2 / funAUC(WinMean, N.per.mm2))
+
+#Some groups only have 1 occurence, the normalized value is Inf in this cases, replace with 1
+#Ask Alberto if he occured this problem, AUC function should be fixed
+AUCScaledSlides_300$N.per.mm2.scaled[AUCScaledSlides_300$N.per.mm2.scaled == Inf] <- 1
+
+
+#double check if the AUC of AUCs is 1
+AUCcheck_panck <- AUCScaledSlides_300 %>%
+  dplyr::group_by(phenotype_from, phenotype_to, tnumber) %>%
+  dplyr::mutate(AUC = funAUC(WinMean, N.per.mm2.scaled))
+
+#save this
+# AUCScaledSlides_300_tumorandstroma$Response <- nabresFiltered$two_class_pa_response[match(AUCScaledSlides_300_tumorandstroma$tnumber, nabresFiltered$tnumber)]
+write_delim(AUCScaledSlides_300 %>% 
+              mutate(phenotype_combo=paste(phenotype_from,phenotype_to,sep='_to_')), paste(here('scratch/AUCScaledSlides_300'), '.tsv', sep=''),delim='\t')
+
+```
+
+
+## Parameter estimation
+```{r}
+invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
+
 library(ComplexHeatmap)
+library(tidyverse)
 library(plyr)
 library(cold) #function fixeff()
 library(lme4)
 library(glmmTMB)
 library(fitdistrplus)
 library(tidyr)
-
-library(magrittr)
-library(stats)
-library(nlme)
-library(dplyr)
-library(gridExtra)
-
-source(here("UtilityFunctions.R"))
-
-cells <- getCells()
-phenotypes <- get_phenotypes()
-n_threads <- parallel::detectCores()
+library(cold)
+library(broom)
+library(ggpubr) # stat_compare_means
+library(here)
+library(fst)
 ```
-
-## 1-NN distance copmutation
-
-
-```{r 1-NN distances}
-
-
-```
-
-## Parameter estimation
 
 
 ```{r parameters}
+all_distances_data <- read_delim(here('scratch/AUCScaledSlides_300.tsv'),delim='\t',
+                                 col_types=list(tumor_stroma=col_character()))
 
+all_distances_data <- all_distances_data %>% as_tibble %>% 
+  mutate(distance_window = WinMean) %>% 
+  mutate(phenotype_combo = paste(phenotype_from, phenotype_to, sep='_to_')) %>% 
+  dplyr::select(tnumber, phenotype_combo, `N.per.mm2.scaled`, distance_window) %>%
+  mutate(new = `N.per.mm2.scaled` * 1000) %>%
+  mutate(new =round(new))
+
+# Recreate 1-NN histogram from coordinates (this is required for function "fitdistrplus")
+all_combos_dists <- tibble()
+for(tn in unique(all_distances_data %>% pull(tnumber))){
+  for(combo in unique(all_distances_data %>% pull(phenotype_combo))){
+    all_dists_tnum <- list()
+    # dists <- all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(distance_window)
+    # times <- all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(new)
+    dists <- c(1,all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(distance_window) )
+    times <- c(1, all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(new))
+    
+    if(length(times) == 0){
+      dists <- c(1:298)
+      times <- rep(0,length(c(1:298)))
+    }
+    for(i in 1:length(times)){
+      all_dists_tnum <- c(all_dists_tnum, rep(dists[i], times[i]))
+    } 
+    aldists <- unlist(all_dists_tnum %>% as.numeric)
+    aldistsdf <- as_tibble(data.frame(dists = aldists, 
+                                      tnumber = rep(tn, length(aldists)),
+                                      combo = rep(combo, length(aldists))))
+    all_combos_dists <- bind_rows(all_combos_dists, aldistsdf)
+  }
+  
+}
+
+```
+
+```{r}
+# Fit a Weibull distribution by Maximum likelihood (this is an initial estimation)
+initial_params <- data.frame(matrix(ncol=5, nrow=0))
+colnames(initial_params) <- c('term','estimate','std.error', 'tnumber','combo')
+initial_params <- initial_params %>% 
+  mutate(term=as.character(term), estimate=as.numeric(estimate), `std.error`=as.numeric(`std.error`),tnumber=as.numeric(tnumber),
+         combo=as.character(combo))
+
+for(combo in unique(all_distances_data %>%  pull(phenotype_combo))){
+  # for different "tnumber"
+  message(combo)
+  
+  for(tn in unique(all_combos_dists  %>% pull(tnumber))){
+    # take into account only 1-NN dists < 100, because of the precision of fitdists (no of bins in histogram)
+    # EXCEPT for From/To PanCK or negative
+    # the parameters will be further optimized later
+    if(str_detect(combo, 'PanCK\\+_') | str_detect(combo, 'negative_')){
+      params <- fitdist(all_combos_dists %>% 
+                          filter(combo == combo) %>% filter(tnumber == tn)  %>%
+                          pull(dists) ,"weibull") %>% summary 
+    } else{
+      params <- fitdist(all_combos_dists %>% 
+                          filter(combo == combo) %>% filter(tnumber == tn) %>% filter(dists < 100) %>%
+                          pull(dists) ,"weibull") %>% summary 
+    }
+    class(params) <- c("fitdist", "fitdistr") 
+    params <- broom::tidy(params)
+    params <- params %>% mutate(tnumber=rep(tn,nrow(params))) %>%
+      mutate(combo=rep(combo,nrow(params)))
+    
+    initial_params <- bind_rows(initial_params, params)
+    }
+}
+
+initial_params_weib <- initial_params
+
+write_delim(initial_params_weib, here('scratch/initial_params_weib.tsv'),delim='\t')
 ```
 
 
 ## Fitting NLME model
 
+Fit a Weibull function using a nonlinear-mixed fixed effect model to the 1-NN distribution curve
+
+```{r}
+invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
+
+library(tidyverse)
+library(ggpubr)
+library(readxl)
+library(reshape2)
+library(dbscan)
+library(broom)
+library(zoo)
+library(knitr)
+library(magrittr)
+library(NMF,quietly = T)
+library(MASS)
+library(car)
+library(doParallel)
+library(stats)
+library(foreach)
+library(spatstat)
+# library(raster)
+library(nlme)
+library(dplyr)
+library(gridExtra)
+library(here)
+```
+
+
 ```{r NLME model}
+initial_params <- initial_params_weib
+
+#TODO Calculate number of cells for each cell type / sample (will be used later for filtering purposes)
+n_cells <- aggregate(cells$phenotype, by=list(cells$tnumber,cells$phenotype), FUN=length)
+colnames(n_cells) <- c('tnumber', 'phenotype', 'n')
+
+xy_data_exc_oct <- read_delim(here('scratch/AUCScaledSlides_300.tsv'),delim='\t') %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(x=distance_window, y=`N.per.mm2.scaled`) 
+
+#Missing clincial data from 3 blocks
+threshold_pixels <- 300
+threshold_microns <- threshold_pixels/2
+
+# Define maximum Shape (A_max) and maximum Scale (B_max) parameters for your fits
+B_max <- 500 # max scale parameter (0,500]
+A_max <- 10  # max shape parameter (0,10]
+
+# Define Weibull and parameterized Weibull functions, and functions to convert between parameterized and
+## non parameterized Weibull
+## (Parameterization was done to ease the fitting procedure, in a non-restricted manner)
+convert_params <- function(a,b){
+  A=-log(A_max/a - 1)
+  A = as.numeric(A)
+  B=-log(B_max/b-1)
+  B = as.numeric(B)
+  return(c(A=A,B=B))
+}
+
+convert_params_reverse <- function(A,B){
+  a=A_max/(1+exp(-A))
+  b=B_max/(1+exp(-B))
+  return(c(a=a,b=b))
+}
+# Define Weibull distribution function in a parameterized way:
+nform2 <- ~(( ( A_max/(1+exp(-A)) )  / ( B_max/(1+exp(-B)) )) * (( x/( B_max/(1+exp(-B))) )^(( A_max/(1+exp(-A)) )-1)) * exp(-1* (x/( B_max/(1+exp(-B))))^( A_max/(1+exp(-A)) )))
+
+weibfunc2 <- function(x,A,B){
+  a = A_max/(1+exp(-A))
+  b = B_max/(1+exp(-B)) 
+  return(((a/b) * ((x/b)^(a-1)) * exp(- (x/b)^a)))
+}
+
+nfun2 <- deriv(nform2,namevec=c("A","B"),
+               function.arg=c("x","A","B"))
+
+```
+
+```{r}
+# Define function to fit a Weibull model to x/y coordinates of normalized 1-NN distance
+## distribution coordinates, filtering out samples with n_cells < threshold_filter_cells
+#' @param xy_coordinates_curves 1-NN distribution coordinate dataframe
+#' @param combi Cell combination of interest: 'CellFROM_to_CellTO'
+#' @param n_cells_df Dataframe with number of cells per sample (for each cell type)
+#' @param threshold_filter_cells Threshold to filter out samples depending on the cell number
+#' @param initial_params_df Dataframe with initial Weibull parameters
+fit_data <- function(xy_coordinates_curves, combi, n_cells_df, threshold_filter_cells,
+                     initial_params_df){
+  message(combi)
+  xy_data_filt <- xy_coordinates_curves %>% filter(phenotype_combo == combi) %>% as_tibble
+  
+  xy_data_filt <- xy_data_filt %>% 
+    left_join(n_cells_df %>% mutate(n_from=n) %>% dplyr::select(-n), by=c('tnumber','phenotype_from'='phenotype')) %>%
+    left_join(n_cells_df %>% mutate(n_to=n) %>% dplyr::select(-n), by=c('tnumber','phenotype_to'='phenotype'))
+  
+  threshold_cells <- threshold_filter_cells
+  message(xy_data_filt %>% filter(n_from<=threshold_cells & n_to <= threshold_cells) %>%
+            mutate(tnumber=paste(tnumber, 'nFROM', as.character(n_from), 'nTO',as.character(n_to))) %>% 
+            pull(tnumber) %>% unique %>% paste(collapse=' / '))
+  
+  xy_data_filt <- xy_data_filt %>% filter(n_from>threshold_cells & n_to > threshold_cells)
+  
+  # Add missing observations in data and set to 0
+  ## i.e. if no distances were observed beyond 100 microns, the normalized scaled counts 
+  ## from 100 to 300 microns will be set to 0 
+  # include 0,0 or only 1,0??
+  xy_data_filt <- expand.grid(x=c(1,xy_data_filt %>%pull(distance_window) %>% unique), 
+                              tnumber=xy_data_filt %>%pull(tnumber) %>% unique,
+                              phenotype_combo=combi) %>%
+    left_join(xy_data_filt, by=c('x','tnumber', 'phenotype_combo')) %>%
+    mutate(y=ifelse(is.na(y),0,y))
+  
+  mean_params <- initial_params_df %>% filter(combo == combi) %>%
+    filter(tnumber %in% unique(xy_data_filt$tnumber)) %>% 
+    group_by(term) %>% dplyr::summarise(mean_estimate = mean(estimate))
+  
+  start_params <- c(a=mean_params %>% filter(term == 'shape') %>% pull(mean_estimate),
+                    b=mean_params %>% filter(term == 'scale') %>% pull(mean_estimate))
+
+  if(combi == 'PanCK+_to_PanCK+'){
+    start_params <- c(a=3, b=10) # rewrite exception imsicion for pck-pck
+  }
+  
+  fit52_oct <- tryCatch({
+    nlme(y~nfun2(x,A,B),
+         fixed=A+B~1,
+         random=list(tnumber=pdDiag(A+B~1)), # or pdDiag, pdLogChol
+         data=xy_data_filt %>% mutate(tnumber = factor(tnumber)),
+         start=convert_params(start_params['a'], start_params['b']),
+         method='REML', control = nlmeControl(maxIter = 1000, 
+                                              returnObject = F,
+                                              msMaxIter=200,
+                                              pnlsTol=1e-1, 
+                                              tolerance=1e-6, opt="nlm"))
+  },
+  error=function(cond){
+    message(paste('failed',combi))
+    return(combi)
+  })
+  # }
+  return(list(model=fit52_oct, xy_data=xy_data_filt))
+  
+}
+```
+
+# Implement pipeline:
+* First try to fit models for ALL data
+* If for a particular phenotype combo it doesn't work, fit:
+** Fit all data with n_cells > 20
+** If not, increase the threshold from 20 to 100
+
+```{r}
+
+# Define phenotype combinations to study in data
+combinations_to_study <- unique(xy_data_exc_oct %>% pull(phenotype_combo))
+
+success_models <- list() # Fitted models
+
+# Dataframe to store fitted Weibull coefficients
+weib_coefs <- data.frame(matrix(nrow=0,ncol=4))
+colnames(weib_coefs) <- c('a','b','sample','phenotype_combo')
+weib_coefs$a %<>% as.numeric()  # shape
+weib_coefs$b %<>% as.numeric()  # scale
+weib_coefs$sample %<>% as.character()
+weib_coefs$phenotype_combo %<>% as.character()
+
+# Function to store x/y coordinates used for modelling
+xy_data_weib <- xy_data_exc_oct %>% slice(0)
+xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
+
+# Function to iterate through pheno combos
+subset_combinations <- combinations_to_study
+# Iterate through different number of threshold minimum number of cells sample
+## (in some cases, all samples word, in other strenghter filter need to be 
+## applied to samples with low number of cells)
+for(threshold_cells in c(0,20,50,70,100)){
+  model_objects <- list()
+  if(length(subset_combinations) > 0){
+    for(combi in subset_combinations){
+      message(threshold_cells)
+      # Fit Weibull distribution
+      ## If fit succeds, a nlme model is returned, otherwise a character
+      ## with the name of the failed phenotype combination is returned
+      pipeline_run <- fit_data(xy_data_exc_oct, combi, n_cells, 
+                               threshold_cells, initial_params)
+      model_objects <- append(model_objects,
+                              list(combi=pipeline_run[['model']]))
+      fitted_model <- tail(model_objects, 1)[[1]] # retrieve fitted model in the for loop
+      # If the model successfully fitted, append estimated parameters of the model                        
+      # if(class(fitted_model)  != 'character'){
+      if(!is(fitted_model, 'character')){
+        # Weibull parameters:
+        new_data_weib_param <- as_tibble(ranef(fitted_model)) %>%
+          mutate(sample=rownames(ranef(fitted_model))) %>%
+          mutate(A=A + fixef(fitted_model)['A'],
+                 B=B+ fixef(fitted_model)['B']) %>%
+          mutate(phenotype_combo=combi) %>%
+          mutate(a=10/(1+exp(-A)),b=500/(1+exp(-B)))
+        weib_coefs <- bind_rows(weib_coefs, new_data_weib_param)
+        
+        # x/y coordinates of input / output model: 
+        xy_data_weib <- bind_rows(xy_data_weib,
+                                      pipeline_run[['xy_data']] %>% mutate(yhat=fitted(fitted_model)))
+      }
+    }
+  }
+  names(model_objects) <- subset_combinations
+  # Update subset combinations. Include only phenotype combinations whose modelling failed
+  subset_combinations <- names(model_objects)[lapply(model_objects, class) == 'character']
+  
+  # Update list of succesfully fitted models
+  success_models <- append(success_models,
+                           model_objects[lapply(model_objects, class) != 'character'])
+  
+}
+
+
+```
+```{r}
+# Process parameters
+final_parameters <- data.frame()
+for(combi in names(success_models)){
+  fixefect <- fixef(success_models[[combi]])
+  ranef <- ranef(success_models[[combi]])
+  
+  final_parameters <- final_parameters %>% 
+    bind_rows(  ranef %>%
+                  mutate(tnumber= rownames(ranef),
+                         phenotype_combo=combi) %>% 
+                  mutate(A = A + fixefect[['A']],
+                         B = B + fixefect[['B']]) %>%
+                  mutate(a=10/(1+exp(-A)),b=500/(1+exp(-B))))
+  
+}
+
+final_parameters %>%
+  # separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_') %>%
+  # mutate(phenotype_to=mapvalues(phenotype_to, from=c('CD20+','CD3+','CD3+FoxP3+',
+  #                                                    'CD68+','CD8+CD3+','PanCK+'),
+  #                               to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
+  # mutate(phenotype_from=mapvalues(phenotype_from, from=c('CD20+','CD3+','CD3+FoxP3+',
+                                  #                        'CD68+','CD8+CD3+','PanCK+'),
+                                  # to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
+  # mutate(phenotype_to=paste('to',phenotype_to)) %>%
+  ggplot(aes(x=a, y=b)) +
+  geom_point(alpha=0.7, size=0.5) +
+  # geom_density_2d() +
+  theme_bw() + scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + scale_color_brewer(palette='Set2') +
+  theme(legend.position='right')
+
+
+# final_parameters %>%
+#   separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_') %>%
+#   # mutate(phenotype_to=mapvalues(phenotype_to, from=c('CD20+','CD3+','CD3+FoxP3+',
+#   #                                                    'CD68+','CD8+CD3+','PanCK+'),
+#   #                               to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
+#   # mutate(phenotype_from=mapvalues(phenotype_from, from=c('CD20+','CD3+','CD3+FoxP3+',
+#                                   #                        'CD68+','CD8+CD3+','PanCK+'),
+#                                   # to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
+#   mutate(phenotype_to=paste('to',phenotype_to)) %>%
+#   ggplot(aes(x=a, y=b, color=phenotype_from)) +
+#   geom_point(alpha=0.7, size=0.5) +
+#   # geom_density_2d() +
+#   theme_bw() + scale_y_log10() +
+#   xlab('Shape') + ylab('Scale') + facet_wrap(~phenotype_to, nrow=2) + scale_color_brewer(palette='Set2') +
+#   theme(legend.position='right')
 
 ```
 
