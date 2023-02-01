@@ -13,7 +13,6 @@ In this document we apply the method developed by Gil-Jimenez et al. to the META
 
 ```{r libraries and settings, echo=FALSE}
 # invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
-options(warn=-1)
 
 library(here)
 library(fst)
@@ -44,33 +43,48 @@ library(gridExtra)
 
 
 ```
+```{r}
+# Unregister open clusters
+unregister_dopar <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+}
+
+unregister_dopar()
+```
+
 
 ## 1-NN distance copmutation
+Alberto uses two input files:
+* A cell dataframe with columns: "tnumber', "analysisregion", "layer", "Xmin", "Xmax", "Ymin", "Ymax", "Xcenter", "Ycenter", "phenotype", "cellarea"
+* A tissue area dataframe with columns:"tnumber', "Tumor.Area.mm2", "Stroma.Area.mm2", "Total.Area"
 
-```{r change labels}
+We miss some of this information. We only have cell centroid coordinates and we don't have tissue area.
+
+
+```{r filtering and cleaning}
+# Rename labels to fit methods of Alberto
 cells <- cells %>% rename(tnumber = ImageNumber)
 cells <- cells %>% rename(phenotype = meta_description)
 cells <- cells %>% rename(Xcenter = Location_Center_X)
 cells <- cells %>% rename(Ycenter = Location_Center_Y)
 
-#Data with sample number, cell index number, spatial location, phenotype and area
+# Remove unncessary attributes
 cells <- cells[,c("tnumber", "ObjectNumber", "Xcenter", "Ycenter", "phenotype", "AreaShape_Area")]
 
-#For debugging we take a small subset, remove this when code is working
-cells <- cells[cells$tnumber %in% seq(1,10)]
+#To take a small subset (debugging purposes):
+# cells <- cells[cells$tnumber %in% seq(1,10)]
 ```
 
-```{r}
-# call cores (parallelization)
-# Comment this because of limitation on core usability in darwin
-nc <- detectCores()
-cl <- makePSOCKcluster(floor(nc / 4) )
-registerDoParallel(cl)
-```
-
-Compute all 1-NN distances
+Compute all 1-NN distances.
 
 ```{r 1-NN distances}
+# call cores (parallelization)
+# Comment this because of limitation on core usability in darwin
+cores=detectCores()
+cl <- makeCluster(floor(cores[1]/4))
+registerDoParallel(cl)
+
 # First NNdist all-against-all phenotypes
 #' @param x Multiplex immunofluorescence coordinate dataframe (with Xcenter, Ycenter, phenotype, etc)
 #' @param phenotype1 Phenotype From
@@ -99,8 +113,8 @@ distances <- function(x, phenotype1,phenotype2) {
 }
 
 # Define which phenotypes will be studied (UNIQUE CELL TYPES IN YOUR DATASET)
-# phenotypes <- unique(cells$phenotype) #All phenotypes
-phenotypes <- unique(phenotype_list$stromal_immune$pg_id_map$meta_description) #Only stromal immune phenotypes
+# phenotypes <- unique(cells$phenotype) #All cell types
+phenotypes <- unique(phenotype_list$stromal_immune$pg_id_map$meta_description)[1] #Take only 1 for debugging
 
 # Compute 1-NN for all combinations of samples (n=24) x phenotype FROM (n=7) x phenotype TO (n=7)
 spatresall <-
@@ -118,6 +132,7 @@ spatresall <-
             return(spres)
           }
 
+stopCluster(cl)
 ```
 
 Clean-up.
@@ -132,32 +147,39 @@ dfl <- lapply(spatresall, function(tnr){
   })
 })
 
-
 dfl2 <- lapply(dfl, function(tnr){
   rbindlist(tnr, idcol = "phenotype_from")
 })
 
 dfl3 <- rbindlist(dfl2, idcol = "tnumber")
 
-dfl4 <- dfl3
+#add pseudocounts on distances for log transform
+#1 pixel = 1 micron
+dfl3$Distance <- (dfl3$Distance + 1)
 
-#add pseudocounts on distances for log transform AND division by 2 for conversion pixels to micrometers
-dfl4$Distance <- (dfl4$Distance + 1) / 2
-
-NNTUR <- dfl4
+NNdistances <- dfl3
 
 # free up some memory. these temps are no longer needed
 rm(dfl)
 rm(dfl2)
 rm(dfl3)
-rm(dfl4)
 gc() # do garbage collection to free up memory
 ```
-Group 1-NN distances in bins.
+```{r}
+ggplot(NNdistances, aes(x=phenotype_from, y=Distance)) + 
+    geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggplot(NNdistances, aes(x=phenotype_to, y=Distance)) + 
+    geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+Estimate 1-NN distance distribution by grouping distances in bins.
 
 ```{r}
-# Explore data from 0 to 300 microns 
-# Modification for PanCK+: extend the maximum distance count further than 99 microns; do up to 300 microns
+options(dplyr.summarise.inform = FALSE)
+
+# Explore data from 0 to 300 microns
 SlidingBins_300 <- rollapply(c(0:300),5,function(y) { return(c(min(y),max(y)))})
 
 CountRows <- function(x) {
@@ -166,7 +188,7 @@ CountRows <- function(x) {
 }
 
 BinCounts_300 <- apply(SlidingBins_300, 1, function(x) {
-  CurrentWindow <- subset(NNTUR, Distance >= x[1] & Distance <= x[2])
+  CurrentWindow <- subset(NNdistances, Distance >= x[1] & Distance <= x[2])
   GroupCounts <- CurrentWindow %>% group_by(tnumber, phenotype_from, phenotype_to) %>%
     dplyr::summarise(N = dplyr::n())
   return(GroupCounts)
@@ -180,8 +202,6 @@ dfslides_300$ID <- row.names(dfslides_300)
 LongBinCounts_300 <- bind_rows(BinCounts_300, .id = "nth_window")
 # WinMean is the X coordinate of your "calculated histogram"
 LongBinCounts_300$WinMean <- dfslides_300$V3[match(LongBinCounts_300$nth_window, dfslides_300$ID)]
-# LongBinCounts_300$Response <- nabresFiltered$two_class_pa_response[match(LongBinCounts_300$tnumber, nabresFiltered$tnumber)]
-
 
 # We don't have total areas, sum all cell areas or take max and min x and y coordinate?
 areas <- left_join(aggregate(Xcenter ~ tnumber, cells, function(x) min(x)),
@@ -211,18 +231,20 @@ AUCScaledSlides_300 <- LongBinCounts_300 %>%
   dplyr::group_by(phenotype_from, phenotype_to, tnumber) %>%
   dplyr::mutate(N.per.mm2.scaled = N.per.mm2 / funAUC(WinMean, N.per.mm2))
 
-#Some groups only have 1 occurence, the normalized value is Inf in this cases, replace with 1
-#Ask Alberto if he occured this problem, AUC function should be fixed
-AUCScaledSlides_300$N.per.mm2.scaled[AUCScaledSlides_300$N.per.mm2.scaled == Inf] <- 1
+stopifnot(!(Inf %in% AUCScaledSlides_300$N.per.mm2.scaled))
 
+# Sometimes there are INf values here
+# How to solve this?
+# Remove or make 1?
+# AUCScaledSlides_300 <- AUCScaledSlides_300[!is.infinite(AUCScaledSlides_300$N.per.mm2.scaled),]
 
 #double check if the AUC of AUCs is 1
-AUCcheck_panck <- AUCScaledSlides_300 %>%
+AUCcheck <- AUCScaledSlides_300 %>%
   dplyr::group_by(phenotype_from, phenotype_to, tnumber) %>%
   dplyr::mutate(AUC = funAUC(WinMean, N.per.mm2.scaled))
+stopifnot(length(unique(lapply(unique(AUCcheck$AUC), round)))==1)
 
 #save this
-# AUCScaledSlides_300_tumorandstroma$Response <- nabresFiltered$two_class_pa_response[match(AUCScaledSlides_300_tumorandstroma$tnumber, nabresFiltered$tnumber)]
 write_delim(AUCScaledSlides_300 %>% 
               mutate(phenotype_combo=paste(phenotype_from,phenotype_to,sep='_to_')), paste(here('scratch/AUCScaledSlides_300'), '.tsv', sep=''),delim='\t')
 
@@ -230,7 +252,7 @@ write_delim(AUCScaledSlides_300 %>%
 
 
 ## Parameter estimation
-```{r}
+```{r load packages 2, echo=FALSE}
 invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
 
 library(ComplexHeatmap)
@@ -246,10 +268,16 @@ library(broom)
 library(ggpubr) # stat_compare_means
 library(here)
 library(fst)
+library(doParallel)
+
+library(data.table)
+library(ggplot2)
+library(assertthat)
+source(here("UtilityFunctions.R"))
 ```
 
 
-```{r parameters}
+```{r estimate parameters}
 all_distances_data <- read_delim(here('scratch/AUCScaledSlides_300.tsv'),delim='\t',
                                  col_types=list(tumor_stroma=col_character()))
 
@@ -265,8 +293,7 @@ all_combos_dists <- tibble()
 for(tn in unique(all_distances_data %>% pull(tnumber))){
   for(combo in unique(all_distances_data %>% pull(phenotype_combo))){
     all_dists_tnum <- list()
-    # dists <- all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(distance_window)
-    # times <- all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(new)
+    
     dists <- c(1,all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(distance_window) )
     times <- c(1, all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(new))
     
@@ -286,9 +313,43 @@ for(tn in unique(all_distances_data %>% pull(tnumber))){
   
 }
 
+# # Takes a long time, do this in parallel?
+# # Recreate 1-NN histogram from coordinates (this is required for function "fitdistrplus")
+# cores=detectCores()
+# cl <- makeCluster(floor(cores[1]/4)) #not to overload your computer
+# registerDoParallel(cl)
+# 
+# all_combos_dists <- foreach(tn = unique(all_distances_data %>% pull(tnumber)), .combine=rbind, .packages="tidyverse") %dopar% {
+#   for(combo in unique(all_distances_data %>% pull(phenotype_combo))){
+#     all_dists_tnum <- list()
+#     dists <- c(1,all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(distance_window) )
+#     times <- c(1, all_distances_data %>% filter(tnumber == tn) %>% filter(phenotype_combo == combo) %>% pull(new))
+#     
+#     if(length(times) == 0){
+#       dists <- c(1:298)
+#       times <- rep(0,length(c(1:298)))
+#     }
+#     
+#     for(i in 1:length(times)){
+#       all_dists_tnum <- c(all_dists_tnum, rep(dists[i], times[i]))
+#     }
+#     
+#     aldists <- unlist(all_dists_tnum %>% as.numeric)
+#     aldistsdf <- as_tibble(data.frame(dists = aldists, 
+#                                       tnumber = rep(tn, length(aldists)),
+#                                       combo = rep(combo, length(aldists))))
+#     
+#   }
+#   aldistsdf
+# }
+# 
+# stopCluster(cl)
+
+write_delim(all_combos_dists, here('scratch/all_combos_dists.tsv'),delim='\t')
+
 ```
 
-```{r}
+```{r fit weibull}
 # Fit a Weibull distribution by Maximum likelihood (this is an initial estimation)
 initial_params <- data.frame(matrix(ncol=5, nrow=0))
 colnames(initial_params) <- c('term','estimate','std.error', 'tnumber','combo')
@@ -296,35 +357,41 @@ initial_params <- initial_params %>%
   mutate(term=as.character(term), estimate=as.numeric(estimate), `std.error`=as.numeric(`std.error`),tnumber=as.numeric(tnumber),
          combo=as.character(combo))
 
+
 for(combo in unique(all_distances_data %>%  pull(phenotype_combo))){
   # for different "tnumber"
   message(combo)
-  
+
   for(tn in unique(all_combos_dists  %>% pull(tnumber))){
-    # take into account only 1-NN dists < 100, because of the precision of fitdists (no of bins in histogram)
+        # take into account only 1-NN dists < 100, because of the precision of fitdists (no of bins in histogram)
     # EXCEPT for From/To PanCK or negative
     # the parameters will be further optimized later
+
+  # There are some instances that have only 1 occurence or where the parameters cannot be estimated, 
+  # We probably need more filtering earlier
+    tryCatch({
     if(str_detect(combo, 'PanCK\\+_') | str_detect(combo, 'negative_')){
-      params <- fitdist(all_combos_dists %>% 
+      params <- fitdist(all_combos_dists %>%
                           filter(combo == combo) %>% filter(tnumber == tn)  %>%
-                          pull(dists) ,"weibull") %>% summary 
+                          pull(dists) ,"weibull") %>% summary
     } else{
-      params <- fitdist(all_combos_dists %>% 
+      params <- fitdist(all_combos_dists %>%
                           filter(combo == combo) %>% filter(tnumber == tn) %>% filter(dists < 100) %>%
-                          pull(dists) ,"weibull") %>% summary 
+                          pull(dists) ,"weibull") %>% summary
     }
-    class(params) <- c("fitdist", "fitdistr") 
+    class(params) <- c("fitdist", "fitdistr")
     params <- broom::tidy(params)
     params <- params %>% mutate(tnumber=rep(tn,nrow(params))) %>%
       mutate(combo=rep(combo,nrow(params)))
-    
+
     initial_params <- bind_rows(initial_params, params)
-    }
+    }, error=function(e){})
+  }
 }
 
 initial_params_weib <- initial_params
 
-write_delim(initial_params_weib, here('scratch/initial_params_weib.tsv'),delim='\t')
+write_delim(initial_params_weib, here('scratch/initial_params_weib_stromalImmune.tsv'),delim='\t')
 ```
 
 
@@ -332,7 +399,7 @@ write_delim(initial_params_weib, here('scratch/initial_params_weib.tsv'),delim='
 
 Fit a Weibull function using a nonlinear-mixed fixed effect model to the 1-NN distribution curve
 
-```{r}
+```{r load packages 3}
 invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
 
 library(tidyverse)
@@ -359,10 +426,10 @@ library(here)
 ```
 
 
-```{r NLME model}
-initial_params <- initial_params_weib
+```{r NLME model presettings}
+initial_params <- read_delim(here('scratch/initial_params_weib_stromalImmune.tsv'),delim='\t')
 
-#TODO Calculate number of cells for each cell type / sample (will be used later for filtering purposes)
+# Calculate number of cells for each cell type / sample (will be used later for filtering purposes)
 n_cells <- aggregate(cells$phenotype, by=list(cells$tnumber,cells$phenotype), FUN=length)
 colnames(n_cells) <- c('tnumber', 'phenotype', 'n')
 
@@ -370,9 +437,8 @@ xy_data_exc_oct <- read_delim(here('scratch/AUCScaledSlides_300.tsv'),delim='\t'
   mutate(distance_window = WinMean) %>%
   mutate(x=distance_window, y=`N.per.mm2.scaled`) 
 
-#Missing clincial data from 3 blocks
 threshold_pixels <- 300
-threshold_microns <- threshold_pixels/2
+threshold_microns <- threshold_pixels
 
 # Define maximum Shape (A_max) and maximum Scale (B_max) parameters for your fits
 B_max <- 500 # max scale parameter (0,500]
@@ -408,7 +474,7 @@ nfun2 <- deriv(nform2,namevec=c("A","B"),
 
 ```
 
-```{r}
+```{r fit NLME}
 # Define function to fit a Weibull model to x/y coordinates of normalized 1-NN distance
 ## distribution coordinates, filtering out samples with n_cells < threshold_filter_cells
 #' @param xy_coordinates_curves 1-NN distribution coordinate dataframe
@@ -481,7 +547,7 @@ fit_data <- function(xy_coordinates_curves, combi, n_cells_df, threshold_filter_
 ** Fit all data with n_cells > 20
 ** If not, increase the threshold from 20 to 100
 
-```{r}
+```{r NLME for all phenotypes}
 
 # Define phenotype combinations to study in data
 combinations_to_study <- unique(xy_data_exc_oct %>% pull(phenotype_combo))
@@ -511,7 +577,7 @@ for(threshold_cells in c(0,20,50,70,100)){
     for(combi in subset_combinations){
       message(threshold_cells)
       # Fit Weibull distribution
-      ## If fit succeds, a nlme model is returned, otherwise a character
+      ## If fit succeeds, a nlme model is returned, otherwise a character
       ## with the name of the failed phenotype combination is returned
       pipeline_run <- fit_data(xy_data_exc_oct, combi, n_cells, 
                                threshold_cells, initial_params)
@@ -548,7 +614,7 @@ for(threshold_cells in c(0,20,50,70,100)){
 
 
 ```
-```{r}
+```{r process parameters and plot}
 # Process parameters
 final_parameters <- data.frame()
 for(combi in names(success_models)){
@@ -581,22 +647,9 @@ final_parameters %>%
   xlab('Shape') + ylab('Scale') + scale_color_brewer(palette='Set2') +
   theme(legend.position='right')
 
+ggsave(here('output/ShapeScaleScatterplot.png'))
 
-# final_parameters %>%
-#   separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_') %>%
-#   # mutate(phenotype_to=mapvalues(phenotype_to, from=c('CD20+','CD3+','CD3+FoxP3+',
-#   #                                                    'CD68+','CD8+CD3+','PanCK+'),
-#   #                               to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
-#   # mutate(phenotype_from=mapvalues(phenotype_from, from=c('CD20+','CD3+','CD3+FoxP3+',
-#                                   #                        'CD68+','CD8+CD3+','PanCK+'),
-#                                   # to=c('B-cell','T-helper','Treg','Macrophages','CD8 T-cell','Cancer cell'))) %>%
-#   mutate(phenotype_to=paste('to',phenotype_to)) %>%
-#   ggplot(aes(x=a, y=b, color=phenotype_from)) +
-#   geom_point(alpha=0.7, size=0.5) +
-#   # geom_density_2d() +
-#   theme_bw() + scale_y_log10() +
-#   xlab('Shape') + ylab('Scale') + facet_wrap(~phenotype_to, nrow=2) + scale_color_brewer(palette='Set2') +
-#   theme(legend.position='right')
+
 
 ```
 
