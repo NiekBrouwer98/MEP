@@ -25,7 +25,7 @@ library(tictoc)
 library(doMC)
 
 cores = detectCores()
-registerDoMC(28)
+registerDoMC(14)
 
 source(here("UtilityFunctions.R"))
 library(fst)
@@ -183,7 +183,7 @@ xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 # Directory for intermediate results
 dir.create(here('scratch/success_models'))
 
-success_models <- mclapply(combinations_selection, mc.cores = 28, function(combi){
+success_models <- mclapply(combinations_selection, mc.cores = 1, function(combi){
   tryCatch(
   # Skip combinations that take to long to avoid hold-up
   withTimeout({
@@ -235,12 +235,12 @@ success_models <- mclapply(combinations_selection, mc.cores = 28, function(combi
 })
   
 # # Attach names, if statement to avoid error
-# if (length(success_models) == length(combinations_selection)){
-#   names(success_models) <- combinations_selection}
+if (length(success_models) == length(combinations_selection)){
+  names(success_models) <- combinations_selection}
 #     
 toc()
 
-# saveRDS(success_models, file = here('scratch/success_models.rds'))
+saveRDS(success_models, file = here('scratch/success_models.rds'))
 
 #If we reach this, all combinations are estimated and we don't have to save intermediate results
 # unlink(here("scratch/success_models"),recursive=TRUE)

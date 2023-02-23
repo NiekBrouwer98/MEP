@@ -1,0 +1,203 @@
+---
+title: "alberto_results"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(ggrepel)
+
+```
+
+
+## Load data
+
+```{r}
+combinations <- readRDS(here('scratch/combinations_selection.rds'))
+not_estimated_combinations <- c()
+
+get_parameters <- function(combinations){
+  params <- c()
+  for (c in combinations){
+    tryCatch({
+    success_model <- readRDS(here(paste('scratch/success_models/success_models_', c,'.rds', sep='')))
+    params <- append(params, list(success_model[[3]]))
+    names(params)[length(params)] <- c
+    },error=function(e){not_estimated_combinations <- append(not_estimated_combinations, c)})
+    
+  }
+  
+  params_result <- bind_rows(params, .id='phenotype_combo')
+  return(params_result)
+}
+
+all_parameters <- get_parameters(combinations) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_') %>%
+  # Remove outliers
+  filter(a > 0.5) %>%
+  filter(b > 8)
+
+# Compute means of each combination
+means <- all_parameters %>% 
+  group_by(phenotype_from, phenotype_to ) %>% 
+  summarise(mean_a = mean(a),
+            mean_b  = mean(b))
+
+```
+
+
+## Parameter plots
+Plot all parameters to show C-curve
+
+```{r plot all parameters, echo=FALSE}
+ggplot(data = means, aes(x=mean_a, y=mean_b, label=paste(phenotype_from, '_to_', phenotype_to, sep=''))) +
+  geom_point(data = all_parameters, aes(x=a, y=b), alpha=0.5, size=0.5) +
+  geom_density_2d(data = all_parameters, aes(x=a, y=b))
+  ylim(10,300) + xlim(0,6) + scale_y_log10() + theme_bw() +
+  xlab('Shape') + ylab('Scale')
+
+ggsave(paste(here('output/'), 'allparameters_withdensities.png', sep=''))
+
+ggplot(data = means, aes(x=mean_a, y=mean_b, label=paste(phenotype_from, '_to_', phenotype_to, sep=''))) +
+  geom_point(data = all_parameters, aes(x=a, y=b), alpha=0.5, size=0.5) +
+  geom_density_2d(data = all_parameters, aes(x=a, y=b))
+  ylim(10,300) + xlim(0,6) + scale_y_log10() + theme_bw() +
+  geom_point(data = means, size = 2, aes(x=mean_a, y=mean_b, label=paste(phenotype_from, '_to_', phenotype_to, sep='')), color='red') +
+  xlab('Shape') + ylab('Scale') +  scale_y_log10() 
+  # +
+  # geom_text_repel(data          = subset(means,mean_a > quantile(mean_a, 0.99)),
+  #                 nudge_y       = 600,
+  #                 size          = 5,
+  #                 box.padding   = 1.5,
+  #                 point.padding = 0.5,
+  #                 force         = 200,
+  #                 segment.size  = 1,
+  #                 segment.color = "grey50",
+  #                 direction     = "both") +
+  # geom_text_repel(data          = subset(means,mean_b > quantile(mean_b, 0.99)),
+  #                 nudge_y       = 600,
+  #                 # nudge_x       = 7.5,
+  #                 size          = 5,
+  #                 box.padding   = 1.5,
+  #                 point.padding = 0.5,
+  #                 force         = 200,
+  #                 segment.size  = 1,
+  #                 segment.color = "grey50",
+  #                 direction     = "both")
+
+ggsave(paste(here('output/'), 'allparameters_withoutliers.png', sep=''))
+
+```
+
+Now look at specific 'X to celltype' parameters.
+
+```{r plot subset, echo = FALSE}
+
+plot_parameters <- function(combi){
+  point <- all_parameters %>%
+    filter(phenotype_to == combi) %>%
+    ggplot(aes(x=a, y=b, color=phenotype_from)) +
+    geom_point(alpha=0.7, size=3) +
+    ylim(10,300) + xlim(0,6) +
+    theme_bw() + scale_y_log10() +
+    xlab('Shape') + ylab('Scale') +
+    theme(legend.position='right') + ggtitle(paste('From X to ', combi)) + guides(colour = guide_legend(override.aes = list(size=10)))
+  
+  print(point)
+
+  ggsave(paste(here('output/'), combi, '.png', sep=''))
+}
+
+six_combinations <- c('CK8-18^{hi}CXCL12^{hi}', 'B cells','CD4^{+} T cells',
+                      'Macrophages','CD8^{+} T cells','T_{Reg} & T_{Ex}')
+
+for (c in six_combinations){
+  plot_parameters(c)
+}
+
+```
+
+Look at same celltype subset Alberto had.
+
+```{r, reproduce Alberto plots}
+
+plot_sixcelltypes <- function(combi){
+  point <- all_parameters %>%
+  filter(phenotype_to == combi) %>%
+  filter(phenotype_from == 'CD8^{+} T cells' | phenotype_from == 'CD4^{+} T cells' |
+         phenotype_from == 'Macrophages' | phenotype_from == 'B cells' |
+           phenotype_from == 'CK8-18^{hi}CXCL12^{hi}' | phenotype_from == 'T_{Reg} & T_{Ex}' ) %>%
+  ggplot(aes(x=a, y=b, color=phenotype_from)) +
+  geom_point(alpha=0.7, size=2) +
+  ylim(10,300) + xlim(0,6) +
+  theme_bw() + scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + scale_color_brewer(palette='Set2') +
+  theme(legend.position='right') + ggtitle(paste('From X to ', combi))
+  
+  print(point)
+
+  
+  ggsave(paste(here('output/'), combi, '_sixcelltypes.png', sep=''))
+}
+
+for (c in six_combinations){
+  plot_sixcelltypes(c)
+}
+
+
+```
+
+## Heatmap
+Plot heatmap of parameters to find subgroups.
+
+```{r}
+#Generate a correlation matrix
+
+library(ComplexHeatmap)
+
+get_parameters <- function(combinations){
+  params <- c()
+  for (c in combinations){
+    tryCatch({
+      success_model <- readRDS(here(paste('scratch/success_models/success_models_', c,'.rds', sep='')))
+      params <- append(params, list(success_model[[3]]))
+      names(params)[length(params)] <- c
+    },error=function(e){print(c)})
+    
+  }
+  
+  params_result <- bind_rows(params, .id='phenotype_combo')
+  return(params_result)
+}
+
+all_parameters <- get_parameters(combinations) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_') %>%
+  filter(a > 0.5) %>%
+  filter(b > 8)
+
+df_from <- all_parameters %>% select(c('phenotype_from', 'a', 'b'))
+df_to <- all_parameters %>% select(c('phenotype_to', 'a', 'b'))
+
+draw(Heatmap(df_from, name = "Pearson cor\n b coefficient", show_column_names=TRUE, 
+        clustering_distance_columns = "pearson",
+        clustering_distance_rows = "pearson",
+        row_names_gp = gpar(fontsize = 7), column_names_gp = gpar(fontsize = 7, rot=45),
+        cluster_rows  = TRUE, # turn off row clustering
+        row_title_gp = gpar(font = c(1,1)),
+        column_title="b parameter, CR",
+        # top_annotation_height = unit(1, "mm"),
+        show_row_dend = FALSE,show_column_dend =FALSE, column_names_side = "top",
+        col=colorRamp2(c(-1, 0, 1), c("blue", "white", "red")) # scale color scale
+)
+)
+
+```
+
+

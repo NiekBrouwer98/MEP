@@ -170,6 +170,8 @@ for (i in 1:5){
   plts <- ggplot(data = split_parameters_with_clinical[[anova_result[i,"combi"][[1]]]], aes(x=subtype, y=shape)) +
   geom_boxplot() + ggtitle(paste(anova_result[i,"combi"][[1]], ' with p value:', round(anova_result[i,"p-value"][[1]],5)))
   
+  
+  
   print(plts)
 }
 
@@ -196,6 +198,7 @@ for (i in 1:5){
   
   print(plts)
 }
+
 
 ```
 

@@ -95,8 +95,13 @@ ggplot(counts, aes(x=phenotype, y=n)) +
 ggplot(HighDF, aes(x=phenotype, y=n)) +
   geom_boxplot(outlier.shape = NA) + coord_cartesian(ylim =  c(0, 300)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Phenotypes with high number of cells")
 
+ggsave(here('output/boxplot_nphenotypes_metabric.jpg'))
+
 ggplot(LowDF, aes(x=phenotype, y=n)) +
   geom_boxplot(outlier.shape = NA) + coord_cartesian(ylim =  c(0, 300)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Phenotypes with low number of cells")
+
+ggsave(here('output/boxplot_nphenotypes_metabric2'))
+
 
 ```
 Compare this to nabucco data:
@@ -109,10 +114,12 @@ ggplot(nabucco_data) + geom_bar(aes(x=phenotype, y=n, fill=tnumber), stat="ident
 ggplot(nabucco_data, aes(x=phenotype, y=n))+
     geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
 
-nabucco_data_stromal <- nabucco_data %>% filter(!phenotype %in% c('negative', 'PanCK+'))
+nabucco_data_stromal <- nabucco_data %>% filter(!phenotype %in% c('negative'))
 
-ggplot(nabucco_data_stromal, aes(x=phenotype, y=n)) + coord_cartesian(ylim =  c(0, 3000)) + 
+ggplot(nabucco_data_stromal, aes(x=phenotype, y=n)) + coord_cartesian(ylim =  c(0, 7000)) + 
     geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
+
+ggsave(here('output/boxplot_nphenotypes_nabucco.jpg'))
 
 ```
 
