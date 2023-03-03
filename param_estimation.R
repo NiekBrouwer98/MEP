@@ -69,6 +69,8 @@ finished_combinations <- unique(finished_combinations_dir)
 
 combinations_selection <- combinations[combinations %in% finished_combinations == FALSE]
 
+message(length(combinations_selection), " combinations: ", combinations_selection)
+
 threshold_pixels <- 300
 threshold_microns <- threshold_pixels
 
@@ -183,7 +185,7 @@ xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 # Directory for intermediate results
 dir.create(here('scratch/success_models'))
 
-success_models <- mclapply(combinations_selection, mc.cores = 1, function(combi){
+success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi){
   tryCatch(
   # Skip combinations that take to long to avoid hold-up
   withTimeout({

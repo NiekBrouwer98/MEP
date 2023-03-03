@@ -46,7 +46,7 @@ library(gridExtra)
 ```
 
 ```{r, message=FALSE}
-# Unregister open clusters
+# nregister open clusters
 unregister_dopar <- function() {
   env <- foreach:::.foreachGlobals
   rm(list=ls(name=env), pos=env)
