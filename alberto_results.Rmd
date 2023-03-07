@@ -21,6 +21,10 @@ library(tidyverse)
 library(corrplot)
 library(gridExtra)
 library(cowplot)
+library(grid)
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(umap)
 ```
 
 
@@ -29,36 +33,49 @@ library(cowplot)
 ```{r}
 combinations <- readRDS(here('scratch/combinations_selection.rds'))
 
-get_parameters <- function(combinations){
+# The first parameter estimation was done with thresholds [0,20,50,70,100]
+# The second parameter estimation was done with thresholds [0,2,5,10,20]
+# Merge the two estimations
+
+get_parameters <- function(path){
   params <- c()
-  for (c in combinations){
+  files <- list.files(path)
+  for (f in files){
     tryCatch({
-    success_model <- readRDS(here(paste('scratch/success_models/success_models_', c,'.rds', sep='')))
+    success_model <- readRDS(paste(path,f,sep=''))
     params <- append(params, list(success_model[[3]]))
-    names(params)[length(params)] <- c
+    name <- gsub('success_models_','',f)
+    name <- gsub('.rds','',name)
+    names(params)[length(params)] <- name
     },error=function(e){print(e)}, warning=function(w){print(w)})
     
   }
-  
   params_result <- bind_rows(params, .id='phenotype_combo')
   return(params_result)
 }
 
-# Remove outliers
-all_parameters <- get_parameters(combinations) %>%
+all_parameters_firstrun <- get_parameters(here('scratch/success_models/')) %>%
   separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
   filter(a > 0.5) %>%
   filter(b > 8) %>%
-  rename(shape =a , scale = b)
+  rename(shape =a , scale = b) %>%
+  unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
 
-not_estimated_combinations <- setdiff(combinations, unique(all_parameters$phenotype_combo))
+all_parameters_secondrun <- get_parameters(here('scratch/success_models_secondrun/')) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
+  filter(a > 0.5) %>%
+  filter(b > 8) %>%
+  rename(shape =a , scale = b) %>%
+  unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+
+#Bind both results
+all_parameters <- rbind(all_parameters_secondrun, all_parameters_firstrun %>% filter(! unique_sample %in% all_parameters_secondrun$unique_sample))
 
 # Compute means of each combination
 means <- all_parameters %>% 
   group_by(phenotype_from, phenotype_to ) %>% 
   summarise(mean_shape = mean(shape),
             mean_scale  = mean(scale))
-
 
 all_distances_data <- readRDS(file  = here('scratch/AUCScaledSlides_300_ALL.rds'))
 all_distances_data <- all_distances_data %>% as_tibble %>%
@@ -68,33 +85,19 @@ all_distances_data <- all_distances_data %>% as_tibble %>%
   mutate(new = `N.per.mm2.scaled` * 1000) %>%
   mutate(new =round(new))
 
+cells <- getCells()
 clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
-clinical_data <- merge(x= clinical_data, cells %>% select(c(ImageNumber, metabric_id)), by='metabric_id', all.x=T)
-
-combinations <- readRDS(here('scratch/combinations_selection.rds'))
-```
-## number of init parameters
-
-```{r pressure}
-
-initial_parameters <- tibble()
-for (c in combinations){
-    init_params <- readRDS(here(paste('scratch/init_parameters/init_params_', c,'.rds', sep='')))
-    initial_parameters <- bind_rows(initial_parameters, init_params)
-}
-
-print(paste('Number of samples from which the parameters are initialized: ', nrow(initial_parameters)))
+clinical_data <- merge(x= clinical_data, unique(cells %>% select(c(ImageNumber, metabric_id))), by='metabric_id', all.x=T)
 
 ```
 
 
-
-## Failed parameter estimations
-Which combinations could not be estimated?
+## Initial parameters
+Retrieve initial parameters to find parameters that could not be estimated. 
 
 ```{r}
 initial_parameters <- tibble()
-for (c in not_estimated_combinations){
+for (c in combinations){
     init_params <- readRDS(here(paste('scratch/init_parameters/init_params_', c,'.rds', sep='')))
     initial_parameters <- bind_rows(initial_parameters, init_params)
 }
@@ -108,42 +111,70 @@ initial_parameters <- merge(x= initial_parameters %>%
                               select(c(tnumber,combo, estimate)) %>% 
                               rename(scale = estimate),
                             by.x=c('tnumber', 'combo'), 
-                            by.y= c('tnumber', 'combo')) %>% 
-                      separate(combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove=FALSE)
+                            by.y= c('tnumber', 'combo')) %>%
+                      unite('unique_sample', c(tnumber, combo), remove=FALSE) %>% 
+                      separate(combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove=FALSE) %>% 
+                      rename(phenotype_combo = combo)
 
+not_estimated_samples <- initial_parameters  %>% filter(! unique_sample %in% all_parameters$unique_sample)
+not_initialized_samples <- all_parameters %>% filter(unique_sample %in% setdiff(all_parameters$unique_sample, intersect(initial_parameters$unique_sample, all_parameters$unique_sample)))
+
+print(paste('Number of samples from which the parameters are initialized: ', nrow(initial_parameters)))
+print(paste('Number of samples from which the parameters are estimated: ', nrow(all_parameters)))
+print(paste('Number of samples from which the parameters are not estimated: ', nrow(not_estimated_samples)))
+
+
+```
+
+## Failed parameter estimations
+Which combinations could not be estimated?
+
+```{r}
+not_estimated_combinations <- setdiff(combinations, unique(all_parameters$phenotype_combo))
+message('combinations that could not be estimated at all:')
 print(str_sort(not_estimated_combinations))
 ```
-Take a look at the distance distributions of the combinations that could not be fitted.
+
+Take a look at the slides of the samples that were not estimated and look at samples that were not initialized.
 
 ```{r}
-plot_initial_parameters = function(t,c){
-  shape_param = filter(initial_parameters, tnumber==t & combo==c)['shape']
-  scale_param = filter(initial_parameters, tnumber==t & combo==c)['scale']
-  return(ggplot(all_distances_data[all_distances_data$tnumber == t & all_distances_data$phenotype_combo == c ,]) +
-           geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity") + theme_bw()
-           + labs(subtitle = paste('initial params: ', round(shape_param,2), ', ', round(scale_param,2))) + xlim(0,300)) + 
-    theme(plot.subtitle = element_text(size=5,hjust = 0.5))
+show_sample <- function(sample){
+  sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample_points$tnumber) %>% filter(phenotype_combo %in%
+                                                                                                                 sample_points$phenotype_combo),
+                              y = sample_points %>% select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+  
+  dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) +   geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5) +
+  stat_function(fun = dweibull, args = list(shape = sample['shape'][[1]], scale = sample['scale'][[1]]))+
+  xlim(0,300) + theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
+  
+  slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
+                 filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]])) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample['tnumber'][[1]]))
+
+return(plot_grid(dist, slide))
+                         
 }
-library(grid)
 
-combination = not_estimated_combinations[1]
-plts_notexistingparams <- lapply(sample(unique(all_distances_data %>% filter(phenotype_combo == combination) %>% pull(tnumber)), 6, replace=FALSE), plot_initial_parameters, c=not_estimated_combinations[1])
-gridExtra::grid.arrange(grobs = plts_notexistingparams, ncol=2,
-     top = textGrob(combination,gp=gpar(fontsize=12,font=2)))
+sample_points_notinit <- sample_n(not_initialized_samples, 5)
+sample_point_notest <- sample_n(not_estimated_samples, 5)
 
-combination = not_estimated_combinations[3]
-plts_notexistingparams <- lapply(sample(unique(all_distances_data %>% filter(phenotype_combo == combination) %>% pull(tnumber)), 6, replace=FALSE), plot_initial_parameters, c=not_estimated_combinations[1])
-gridExtra::grid.arrange(grobs = plts_notexistingparams, ncol=2,
-     top = textGrob(combination,gp=gpar(fontsize=12,font=2)))
+message('Not initialized:')
+for (row in 1:nrow(sample_points_notinit)){
+  print(show_sample(sample_points_notinit[row,]))
+}
+
+message('Not estimated:')
+for (row in 1:nrow(sample_point_notest)){
+  print(show_sample(sample_points_notest[row,]))
+}
 
 ```
 
 
-Investigate the cell counts of the combinations that could not be estimated
+The combinations that could not be estimated are possibly very rare. Investigate the cell counts of these combinations.
 
 ```{r}
-cells <- getCells()
-
 # Barplot of cell type occurences in combinations
 not_estimated_combinations_df <- tibble(combo = not_estimated_combinations) %>%
   separate(combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove=FALSE)
@@ -158,7 +189,7 @@ ggplot(data=not_estimated_counts_all) + geom_bar(aes(x=reorder(phenotype, n), y=
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
   ggtitle('Cell type occurences in combinations that could not be estimated') + ylab('n') + xlab('')
 
-ggsave(paste(here('output/Alberto_results/'), 'notestimatedoccurences.png', sep=''))
+ggsave(paste(here('output/Alberto_results/'), 'notestimatedoccurences.pdf', sep=''))
 
 ###
 cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
@@ -181,7 +212,7 @@ ggplot(cell_counts_ordered, aes(x=meta_description,n,y=n, fill=type)) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
   ggtitle('Cell type counts per sample') + guides(fill=guide_legend(title="cell type combination")) + xlab('')
 
-ggsave(paste(here('output/Alberto_results/'), 'cellcounts_boxplot.png', sep=''))
+ggsave(paste(here('output/Alberto_results/'), 'cellcounts_boxplot.pdf', sep=''))
 
 
 ###
@@ -200,13 +231,12 @@ ggplot(cell_occurences, aes(x=factor(meta_description, level = lvls), y=n, fill=
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, colour=a)) + 
   ggtitle('Cell type counts in samples') + ylab('percentage') + xlab('')+ guides(fill=guide_legend(title="occurences"))
 
-ggsave(paste(here('output/Alberto_results/'), 'cellcounts_stackedbarplot.png', sep=''))
+ggsave(paste(here('output/Alberto_results/'), 'cellcounts_stackedbarplot_withmissedcombis.pdf', sep=''))
 
 
 ```
 
-
-## Parameter plots
+## Estimated parameters
 Do the parameters look like a C-curve?
 
 ```{r plot all parameters, echo=FALSE}
@@ -261,6 +291,7 @@ ggsave(paste(here('output/Alberto_results/'), 'allparameters_withNABUCCO.pdf', s
 # ggsave(paste(here('output/Alberto_results/'), 'allparameters_withPAM50subtypes.png', sep=''))
 
 ```
+
 Make histograms of curve extremes.
 
 ```{r}
@@ -378,6 +409,7 @@ ggsave(paste(here('output/Alberto_results/'),'boxplots', gsub("[[:punct:]]", "",
 
 ```
 
+Compare the parameters of the six cell types of Alberto with our parameters.
 
 ```{r}
 NABUCCO_parameters <- Alberto_parameters %>%
@@ -451,37 +483,137 @@ for (c in unique(all_parameters$phenotype_combo)){
 saveRDS(shape_parameters, here('scratch/shape_parameter_matrix.rds'))
 saveRDS(scale_parameters, here('scratch/scale_parameter_matrix.rds'))
 
-shape_parameters <- read_rds(here('scratch/shape_parameter_matrix.rds'))
-
-# shape_parameters <- shape_parameters %>% replace(is.na(.), 0)
-# scale_parameters <- scale_parameters %>% replace(is.na(.), 0)
-
-shape_parameters_df <- as.data.frame(shape_parameters)
-scale_parameters_df <- as.data.frame(scale_parameters)
-
-rownames(shape_parameters_df) <- shape_parameters_df$tnumber
-shape_parameters_df <- subset(shape_parameters_df, select=-c(tnumber))
-rownames(scale_parameters_df) <- scale_parameters_df$tnumber
-scale_parameters_df <- subset(scale_parameters_df, select=-c(tnumber))
-
-# Scale scales columns
-shape_parameters_df_scaled <- scale(shape_parameters_df) 
-scale_parameters_df_scaled <- scale(scale_parameters_df) 
+test <- read_rds(here('scratch/shape_parameter_matrix.rds'))
 
 
-library(ComplexHeatmap)
-library(tidyHeatmap)
-ht <- Heatmap(shape_parameters_df_scaled, name = 'shape parameters', column_title = 'combinations', row_title = 'samples', na_col = 'black',
-        row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=2), cluster_rows = FALSE, cluster_columns =  FALSE)
-save_pdf(ht, here('output/shape_heatmap.pdf'), width=20, height=12)
+generate_matrix<- function(df){
+  m <- as.data.frame(df)
+  rownames(m) <- m$tnumber
+  m <- m[,-c(1)]
+  #Only consider combinations with parameters for more than 20% of the samples
+  m <- m[, which(colMeans(!is.na(m)) > 0.2)]
+  m <- m %>% mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
+  m <- scale(m)
+  return(m)
+}
 
-ht <- Heatmap(scale_parameters_df_scaled, name = 'scale parameters', column_title = 'combinations', row_title = 'samples',
-        row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=2), cluster_rows = FALSE)
-save_pdf(ht, here('output/scale_heatmap.pdf'), width=20, height=12)
+generate_hm <- function(df, n_clust, cluster_rows, cluster_columns,fontsize_rows, fontsize_columns, row_title, column_title){
+  m <- generate_matrix(df)
+  
+  ht <- Heatmap(as.matrix(m), name = 'shape parameters', column_title = column_title, row_title = row_title, 
+                row_names_gp = gpar(fontsize=fontsize_rows), column_names_gp = gpar(fontsize=fontsize_columns), 
+                cluster_rows = cluster_rows, cluster_columns =  cluster_columns, row_km = n_clust)
+
+  return(ht)
+}
+
+shape_hm <- generate_hm(read_rds(here('scratch/shape_parameter_matrix.rds')),2, TRUE, TRUE, 2,5,'samples', 'combinations')
+scale_hm <- generate_hm(read_rds(here('scratch/scale_parameter_matrix.rds')),2, TRUE, TRUE, 2,5,'samples', 'combinations')
+
+save_pdf(shape_hm, here('output/shape_heatmap.pdf'), width=20, height=12)
+save_pdf(scale_hm, here('output/scale_heatmap.pdf'), width=20, height=12)
+
+subtype_proportions <- function(clusters){
+  clinical_data <- clinical_data %>% mutate(cluster = NA)
+for (i in 1:length(clusters)){
+  clinical_data <- clinical_data %>% mutate(cluster = ifelse(ImageNumber %in% clusters[[i]], as.character(i),cluster))
+}
+clinical_data <- clinical_data %>% drop_na(cluster)
+
+p <- ggplot() + geom_bar(data=clinical_data, aes(x= 'ALL', y= length(data),fill=PAM50),stat='identity',position='fill')  +
+  geom_bar(data=clinical_data,
+                    aes(x= cluster, y= length(data),fill=PAM50),stat='identity',position='fill') + 
+  xlab('cluster') + ylab('proportion') + theme_bw()
+
+return(p)
+}
  
 
 ```
 
+Cluster samples based on:
+1. densities
+2. close-far combinations
+3. parameters
+
+```{r}
+cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
+                count(ImageNumber, meta_description) %>%
+                rename(tnumber=ImageNumber)
+
+cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>%
+                  mutate(n = coalesce(n, 0))
+
+density_matrix <- tibble(tnumber = unique(cell_occurences$tnumber))
+
+for (c in unique(cell_occurences$meta_description)){
+  density_matrix <- left_join(x = density_matrix, y= cell_occurences %>% 
+                              filter(meta_description == c),
+                            by='tnumber') %>% select(-c(meta_description))
+  names(density_matrix)[names(density_matrix) == 'n'] = c
+}
+
+density_hm <- generate_hm(density_matrix, 5, cluster_rows = TRUE,cluster_columns = FALSE, 2,15,'samples', 'cell type')
+
+save_pdf(density_hm, here('output/density_heatmap.pdf'), width=20, height=12)
+
+draw(density_hm)
+print(subtype_proportions(row_order(density_hm))+ ggtitle('clusters based on cell type densities'))
+
+```
+
+
+```{r}
+# Parameters
+draw_shape_hm <- draw(shape_hm)
+clusters_shape <- row_order(draw_shape_hm)
+draw_scale_hm <- draw(scale_hm)
+clusters_scale <- row_order(draw_scale_hm)
+
+
+print(subtype_proportions(clusters_shape) + ggtitle('clusters based on shape parameter'))
+print(subtype_proportions(clusters_scale) + ggtitle('clusters based on scale parameter'))
+```
+
+## UMAP
+Plot the parameters as UMAP to see if there are clusters of the same cancer subtype.
+
+```{r}
+library(umap)
+
+shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')))
+scale_matrix <- generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')))
+
+labels <- merge(as_tibble(rownames(shape_matrix)), clinical_data %>% select(ImageNumber, PAM50), by.x='value', by.y='ImageNumber', all.x=T) %>% rename(tnumber = value) %>% mutate(tnumber = as.numeric(tnumber))
+
+generate_UMAP <- function(matrix, labels, title){
+  umap <- umap(matrix)
+  umap <- umap$layout %>%
+  as.data.frame()%>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>%
+  mutate(tnumber=row_number())%>%
+  inner_join(labels, by='tnumber')
+
+  return(umap %>%
+  ggplot(aes(x = UMAP1, 
+             y = UMAP2, 
+             color = PAM50))+
+  geom_point()+ theme_bw() +
+  labs(x = "UMAP1",
+       y = "UMAP2",
+      subtitle = title))
+}
+
+print(generate_UMAP(shape_matrix, labels, 'UMAP plot of shape parameters'))
+print(generate_UMAP(scale_matrix, labels, 'UMAP plot of scale parameters'))
+
+
+
+```
+
+
+## scratch
 
 ```{r}
 #Generate a correlation matrix

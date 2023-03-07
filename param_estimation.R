@@ -62,7 +62,7 @@ combinations <- readRDS(here('scratch/combinations_selection.rds'))
 # other_combinations <- combinations[which(!combinations %in% first_combinations)]
 # combinations_selection <- c(first_combinations, other_combinations)
 
-finished_files <- list.files(here('scratch/success_models/'))
+finished_files <- list.files(here('scratch/success_models_secondrun/'))
 finished_combinations_int <-  finished_files %>% str_replace("success_models_", "")
 finished_combinations_dir <- finished_combinations_int %>% str_replace(".rds", "")
 finished_combinations <- unique(finished_combinations_dir)
@@ -183,13 +183,13 @@ xy_data_weib <- xy_data_exc_oct %>% slice(0)
 xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 
 # Directory for intermediate results
-dir.create(here('scratch/success_models'))
+dir.create(here('scratch/success_models_secondrun'))
 
 success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi){
-  tryCatch(
+  tryCatch({
   # Skip combinations that take to long to avoid hold-up
   withTimeout({
-  for(threshold_cells in c(0,20,50,70,100)){
+  for(threshold_cells in c(5,10)){
       message(threshold_cells)
       initial_params <- readRDS(paste(initial_params_folder, '/init_params_', combi, '.rds', sep=''))
       pipeline_run <- fit_data(xy_data_exc_oct, combi, n_cells,
@@ -225,24 +225,32 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
         # result <- setNames(result, combi)
 
         #Save intermediate result
-        saveRDS(result, file = here(paste('scratch/success_models/success_models_', combi, '.rds', sep = '')))
+        saveRDS(result, file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
 
-        return(result)
+        return(list())
       }
+      
   }
-  }, timeout=3600), TimeoutException = function(ex){return(list(list()))}) #Set timeout time (60 min = 3600)
+    
+    # Parameter estimation failed
+    saveRDS(list('FAILEDESTIMATION',list(),list()), file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
+    return(list())
+    
+  }, timeout=3600)}, error = function(ex){
+    saveRDS(list('TIMEOUT',list(),list()), file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
+    return(list())
+  }) #Set timeout time (60 min = 3600)
   
-  # Parameter estimation failed
-  return(list(list()))
 })
   
-# # Attach names, if statement to avoid error
-if (length(success_models) == length(combinations_selection)){
-  names(success_models) <- combinations_selection}
-#     
 toc()
 
-saveRDS(success_models, file = here('scratch/success_models.rds'))
+# # Attach names, if statement to avoid error
+# if (length(success_models) == length(combinations_selection)){
+#   names(success_models) <- combinations_selection}
+#     
+
+# saveRDS(success_models, file = here('scratch/success_models.rds'))
 
 #If we reach this, all combinations are estimated and we don't have to save intermediate results
 # unlink(here("scratch/success_models"),recursive=TRUE)
