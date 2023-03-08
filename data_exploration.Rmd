@@ -1,0 +1,229 @@
+---
+title: "data_exploration"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load data
+
+```{r, results=FALSE}
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+source(here("UtilityFunctions.R"))
+
+cells <- getCells()
+
+cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
+                count(ImageNumber, meta_description)
+```
+
+## Basic information
+
+```{r,echo=FALSE}
+print(paste('Number of samples: ', length(unique(cells$ImageNumber))))
+print(paste('Number of cell types: ', length(unique(cells$meta_description))))
+print(unique(cells$meta_description))
+
+ggplot(data= cells %>% count(ImageNumber)) + geom_bar(aes(y=n, x=ImageNumber), stat='identity') + theme_bw() + ggtitle('Total counts per sample')
+
+ggsave(paste(here('output/data_exploration/'),'totalcounts.pdf', sep=''))
+
+ggplot(data=cells %>% group_by(ImageNumber) %>% count(meta_description)) + geom_boxplot(aes(x=meta_description, y=n)) + theme_bw() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('Cell type counts per sample')
+
+ggsave(paste(here('output/data_exploration/'),'samplecounts.pdf', sep=''))
+
+
+cell_occurences <- merge(cell_counts %>% expand(ImageNumber, meta_description), cell_counts, by = c('ImageNumber','meta_description'), all.x = TRUE) %>%
+                  mutate(n = coalesce(n, 0)) %>%
+                  mutate(category = ifelse(n==0,'0', ifelse(n<10, '0<10', ifelse(n<50,'10<50','>50')))) %>% group_by(meta_description) %>%
+                  count(category)
+
+lvls <- cell_occurences %>% filter(category == '0') %>% arrange(desc(n)) %>% pull(meta_description)
+
+#Haakje: Zijn de samples met hoge counts in cell types met veel 0 counts, verrijkt in bepaaplde subtypes of iets dergelijks?
+ggplot(cell_occurences, aes(x=factor(meta_description, level = lvls), y=n, fill=factor(category, levels=c('>50','10<50','0<10','0')))) + 
+    geom_bar(position="fill", stat="identity") + theme_bw()  +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  ggtitle('Cell type counts in samples') + ylab('percentage') + xlab('')+ guides(fill=guide_legend(title="occurences"))
+
+ggsave(paste(here('output/data_exploration/'),'celltypecounts.pdf', sep=''))
+
+```
+
+
+## cell type occurences
+
+Look at the presence of cell type combinations.
+
+```{r,echo=FALSE}
+cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
+                count(ImageNumber, meta_description) %>%
+                rename(tnumber=ImageNumber)
+
+
+cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description, meta_description), cell_counts, by.x= c('tnumber',"meta_description...2"), 
+                         by.y = c('tnumber',"meta_description"), all.x = TRUE) %>%
+                  mutate(n = coalesce(n, 0))
+
+cell_occurences_combinations <- merge(cell_occurences, cell_counts, by.x= c('tnumber',"meta_description...3"), by.y = c('tnumber',"meta_description"), all.x = TRUE)%>%
+                  mutate(n.y = coalesce(n.y, 0))
+                  
+print(paste('number of samples that cannot be estimated: ', nrow(cell_occurences_combinations %>% filter(n.x == 0 | n.y ==0))))
+
+cell_occurences_combinations_categories <- cell_occurences_combinations 
+
+cell_occurences_combinations_zeros <- cell_occurences_combinations_categories %>% mutate(category = ifelse(n.x >0 & n.y>0, '0+', '0')) %>%
+                                                                       group_by(meta_description...2, meta_description...3) %>%
+                                                                                      count(category) %>% mutate(n = n/792)
+
+df <- cell_occurences_combinations_zeros %>% filter(category =='0')
+
+trans_df <- xtabs(n ~ meta_description...2 + meta_description...3, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), name = 'sample percentage \n with 0 occ.',
+        column_title = 'phenotype_to', row_title = 'phenotype_from')
+
+print(hm)
+
+save_pdf(hm, here('output/data_exploration/zero_occurences_heatmap.pdf'), width=6, height=4)
+
+df <- cell_occurences_combinations_zeros %>% filter(category =='0+')
+
+trans_df <- xtabs(n ~ meta_description...2 + meta_description...3, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), name = 'sample percentage \n with 0+ occ.',
+        column_title = 'phenotype_to', row_title = 'phenotype_from')
+
+print(hm)
+
+save_pdf(hm, here('output/data_exploration/zeroplus_occurences_heatmap.pdf'), width=6, height=4)
+
+cell_occurences_combinations_fives <- cell_occurences_combinations_categories %>% mutate(category = ifelse(n.x >5 & n.y>5, '5+', '5-')) %>%
+                                                                       group_by(meta_description...2, meta_description...3) %>%
+                                                                                      count(category) %>% mutate(n = n/792)
+
+df <- cell_occurences_combinations_fives %>% filter(category =='5+')
+
+trans_df <- xtabs(n ~ meta_description...2 + meta_description...3, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), name = 'sample percentage \n with 5+ occ.',
+        column_title = 'phenotype_to', row_title = 'phenotype_from')
+
+print(hm)
+
+save_pdf(hm, here('output/data_exploration/five_occurences_heatmap.pdf'), width=6, height=4)
+
+cell_occurences_combinations_tens <- cell_occurences_combinations_categories %>% mutate(category = ifelse(n.x >10 & n.y>10, '10+', '10-')) %>%
+                                                                       group_by(meta_description...2, meta_description...3) %>%
+                                                                                      count(category) %>% mutate(n = n/792)
+
+df <- cell_occurences_combinations_tens %>% filter(category =='10+')
+
+trans_df <- xtabs(n ~ meta_description...2 + meta_description...3, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), name = 'sample percentage \n with 10+ occ.',
+        column_title = 'phenotype_to', row_title = 'phenotype_from')
+
+print(hm)
+
+save_pdf(hm, here('output/data_exploration/ten_occurences_heatmap.pdf'), width=6, height=4)
+
+cell_occurences_combinations_twenties <- cell_occurences_combinations_categories %>% mutate(category = ifelse(n.x >20 & n.y>20, '20+', '20-')) %>%
+                                                                       group_by(meta_description...2, meta_description...3) %>%
+                                                                                      count(category) %>% mutate(n = n/792)
+
+df <- cell_occurences_combinations_twenties %>% filter(category =='20+')
+
+trans_df <- xtabs(n ~ meta_description...2 + meta_description...3, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6),
+        column_title = 'phenotype_to', row_title = 'phenotype_from', ,
+        heatmap_legend_param = list(title = 'sample percentage \n with 20+ occ.', at = seq(0, 1, 0.2)))
+
+print(hm)
+
+save_pdf(hm, here('output/data_exploration/twenty_occurences_heatmap.pdf'), width=6, height=4)
+
+
+```
+```{r}
+thresholds <- tibble(threshold = c(0:200))
+                     
+compute_from <- function(t){
+   return(nrow(cell_occurences_combinations %>% filter(n.x >= t)))
+}
+
+
+compute_both <- function(t){
+   return(nrow(cell_occurences_combinations %>% filter(n.x >= t & n.y >= t)))
+}
+
+n_from <- apply(thresholds,1, compute_from)
+n_both <- apply(thresholds,1, compute_both)
+
+thresholds <- cbind(thresholds, n_from, n_to, n_both)
+
+ggplot(data=thresholds) + geom_point(aes(x=threshold, y=n_from, color = 'phenotype_from'))  + 
+  geom_point(aes(x=threshold, y=n_both, color='both')) + theme_bw() + ggtitle('Number of samples with at least x cells') + ylab('count') + xlab('n cells') + xlim(0,50)
+
+ggsave(here('output/data_exploration/occurence_slope.pdf'))
+
+```
+
+
+## Clinical
+
+```{r,echo=FALSE}
+clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
+ggplot(data = clinical_data) + geom_bar(aes(x=PAM50)) + theme_bw() + ggtitle('breast cancer subtype occurences')
+
+ggsave(here('output/data_exploration/subtypes.pdf'))
+
+```
+## Slides
+Look at a random slide
+```{r,echo=FALSE}
+tumor = c("CK^{med}ER^{lo}","ER^{hi}CXCL12^{+}", "CK8-18^{hi}CXCL12^{hi}", "CK^{+} CXCL12^{+}",  "CK8-18^{hi}ER^{lo}", "CK8-18^{+} ER^{hi}",
+           "CK^{lo}ER^{med}", "HER2^{+}"  )
+other = c("CD4^{+} T cells & APCs", "CD4^{+} T cells","Endothelial", "Fibroblasts","Myofibroblasts PDPN^{+}","CD8^{+} T cells", "Myofibroblasts",  
+          "CK^{lo}ER^{lo}","Macrophages", "CD15^{+}", "MHC I & II^{hi}", "T_{Reg} & T_{Ex}", "CD57^{+}", "Ep Ki67^{+}", "Macrophages & granulocytes",
+          "CD38^{+} lymphocytes","Ki67^{+}", "B cells", "Basal", "Fibroblasts FSP1^{+}", "Granulocytes", "MHC I^{hi}CD57^{+}", "Ep CD57^{+}",
+          "MHC^{hi}CD15^{+}")
+
+print_slide <- function(sample_number){
+  print(ggplot(data=cells%>% filter(ImageNumber == sample_number) %>% mutate(type = ifelse(meta_description %in% tumor, 'tumor', 'non-tumor'))) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=type), alpha =0.5) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample_number)))
+  
+  print(ggplot(data=cells%>% filter(ImageNumber == sample_number)) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample_number)))
+}
+
+print_slide(sample(unique(cells$ImageNumber),1))
+
+```
+
+## Expression data
+
+```{r,echo=FALSE}
+library(ComplexHeatmap)
+expression_profiles_summary <- as.data.frame(cells %>% group_by(meta_description)  %>% 
+  summarise_at(vars("Histone H3":"DNA2"), mean))
+rownames(expression_profiles_summary) <- expression_profiles_summary$meta_description
+expression_profiles_summary <- scale(subset(expression_profiles_summary, select=-c(meta_description)))
+  
+hm <- Heatmap(expression_profiles_summary, name = 'mean expression', column_title = 'protein', row_title = 'cell type',
+        row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), cluster_rows = T, cluster_columns =  T)
+
+print(hm)
+
+save_pdf(hm, here('output/expression_profiles.pdf'), width=6, height=4)
+
+```
+
+

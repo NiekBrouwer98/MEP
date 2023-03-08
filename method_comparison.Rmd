@@ -1,0 +1,204 @@
+---
+title: "method_comparison"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+source(here("UtilityFunctions.R"))
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(parallel)
+# library(igraph)
+library(here)
+library(fst)
+library(assertthat)
+library(RColorBrewer)
+# library(latex2exp)
+library(cowplot)
+library(ggpubr)
+
+cells <- getCells()
+structures <- getStructures()
+# communityTMEMapping <- read_fst(here('scratch/TMEStructures.fst'), as.data.table = T)
+# structures$TME$dat$Structure <- as.character(structures$TME$dat$Structure)
+# communityTMEMapping <- merge(x = communityTMEMapping, y = structures$TME$dat, 
+# 	by.x = 'TMEStructure', by.y = 'Structure')
+
+ptLevelInteractions <- merge(x=read_fst(here('scratch/ptLeveLTMEInteractions.fst'), as.data.table=T),y = structures$TME$dat, 
+	by.x = 'TMEStructure', by.y = 'Structure')
+
+```
+
+
+## TLS-like structures
+
+There are many ways to compare the methods of Danenberg and Alberto. Here we start by looking at the correlation between TLS-like structures and combination distances in samples. 
+
+```{r TLS}
+
+TLS_structures <- ptLevelInteractions %>% 
+  select(ImageNumber, Label, TotalInteractions, nInteractionsPerStructure) %>%
+  mutate(proportions =  nInteractionsPerStructure / TotalInteractions) %>%
+  filter(Label == 'TLS-like') %>%
+  mutate_at(vars(ImageNumber), as.character)
+
+TLS_structures %>%
+  filter(proportions > 0) %>%
+  ggplot(aes(x=ImageNumber, y=proportions))  +
+  geom_point(alpha=0.7, size=2)
+
+TLS_distances <- merge(x=TLS_structures, y= all_parameters, by.x='ImageNumber', by.y='tnumber') %>%
+  select(ImageNumber, proportions, phenotype_from, phenotype_to, a,b) %>%
+  unite('combi', phenotype_from:phenotype_to, remove = TRUE, sep= '_to_')
+
+splitted_TLS_distances <- split(TLS_distances, f=TLS_distances$combi)
+
+pearson_a = c()
+pearson_b = c()
+spearman_a = c()
+spearman_b = c()
+
+for (c in 1:length(splitted_TLS_distances)){
+  tryCatch({
+    correlation <- cor.test(splitted_TLS_distances[[c]][['proportions']], splitted_TLS_distances[[c]][['a']] ,  method = "pearson")$estimate[[1]]},
+  error=function(e){correlation <- NA})
+  pearson_a <- append(pearson_a, correlation)
+  tryCatch({
+  correlation <- cor.test(splitted_TLS_distances[[c]][['proportions']], splitted_TLS_distances[[c]][['b']] ,  method = "pearson")$estimate[[1]]},
+  error=function(e){correlation <- NA})
+  pearson_b <- append(pearson_b, correlation)
+  tryCatch({
+    correlation <- cor.test(splitted_TLS_distances[[c]][['proportions']], splitted_TLS_distances[[c]][['a']] ,  method = "spearman")$estimate[[1]]},
+  error=function(e){correlation <- NA})
+  spearman_a <- append(spearman_a, correlation)
+  tryCatch({
+    correlation <- cor.test(splitted_TLS_distances[[c]][['proportions']], splitted_TLS_distances[[c]][['b']] ,  method = "spearman")$estimate[[1]]},
+  error=function(e){correlation <- NA})
+  spearman_b <- append(spearman_b, correlation)
+}
+
+library(ggrepel)
+
+correlations <- tibble('combi'=names(splitted_TLS_distances), 'pearson_a' = pearson_a, 'spearman_a'=spearman_a, 'pearson_b'=pearson_b, 'spearman_b'=spearman_b) %>%
+  drop_na()
+ggplot(data = correlations, aes(x=pearson_a, y=spearman_a, label=combi)) + geom_point() +
+  geom_text_repel(data          = subset(correlations,pearson_a > 0.95),
+                  # nudge_y       = 2,
+                  nudge_x = 2,
+                  size          = 4,
+                  box.padding   = 1.5,
+                  point.padding = 0.5,
+                  force         = 100,
+                  segment.size  = 0.5,
+                  segment.color = "grey50",
+                  direction     = "y") +   xlab('Pearson correlation with shape') + ylab('spearman correlation with shape')
+
+ggplot(data = correlations, aes(x=pearson_b, y=spearman_b, label=combi)) + geom_point() +
+  geom_text_repel(data          = subset(correlations,pearson_b > 0.95),
+                  # nudge_y       = 2,
+                  nudge_x = 2,
+                  size          = 4,
+                  box.padding   = 1.5,
+                  point.padding = 0.5,
+                  force         = 100,
+                  segment.size  = 0.5,
+                  segment.color = "grey50",
+                  direction     = "y") +   xlab('Pearson correlation with scale') + ylab('Pearson correlation with scale')
+
+
+
+```
+
+```{r}
+TLS_cells <- c('CD8^{+} T cells', 'CD4^{+} T cells', 'B cells', 'CD38^{+} lymphocytes', 'Macrophages', 'Fibroblasts', 'Myofibroblasts')
+
+B_cell_correlations <- correlations %>% filter(grepl(paste(TLS_cells, collapse = "|"), combi))
+
+
+ggplot() + geom_point(data = correlations, aes(x=pearson_a, y=spearman_a)) +xlim(c(-1,1)) +ylim(c(-1,1)) +
+  geom_point(data= B_cell_correlations %>% filter(grepl('B cells_to_B cells', combi)), aes(x=pearson_a,y=spearman_a, color=combi),size=3) +
+  xlab('Pearson correlation with shape') + ylab('spearman correlation with shape')
+
+ggplot() + geom_point(data = correlations, aes(x=pearson_b, y=spearman_b)) +xlim(c(-1,1)) +ylim(c(-1,1)) +
+  geom_point(data= B_cell_correlations %>% filter(grepl('B cells', combi)), aes(x=pearson_b,y=spearman_b, color=combi),size=3) +
+  xlab('Pearson correlation with scale') + ylab('Pearson correlation with scale')
+
+```
+## Distances in subtypes
+
+```{r}
+library(stats)
+
+clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
+subtypes <- clinical_data %>% select(c('metabric_id', 'ERStatus', 'PAM50'))
+
+Metabric_mapping <- cells %>% 
+                    select(c('ImageNumber', 'metabric_id')) %>% 
+                    rename('tnumber' = 'ImageNumber') %>%
+                    distinct()
+
+parameters_with_clinical <- merge(x=merge(x=all_parameters, y=Metabric_mapping, by='tnumber', all.x=T),
+                                  y= subtypes, by='metabric_id', all.x=T) %>%
+                            unite(combi, phenotype_from:phenotype_to, remove = TRUE, sep= '_to_') %>%
+                            rename('shape' = 'a', 'scale' = 'b', 'subtype' = "PAM50" ) %>%
+                            drop_na() %>%
+                            group_by(combi) %>%
+                            filter(n() >= 100)
+
+split_parameters_with_clinical <- split(parameters_with_clinical, f=parameters_with_clinical$combi)
+p_values = c()
+
+for (c in 1:length(split_parameters_with_clinical)){
+  tryCatch({
+  one_way <- aov(shape ~ subtype, data = split_parameters_with_clinical[[c]])
+  p_value <- summary(one_way)[[1]][["Pr(>F)"]][1]
+  }, error=function(e){p_value = NA})
+  
+  p_values <- append(p_values, p_value)
+}
+
+anova_result <- tibble('combi'= names(split_parameters_with_clinical), 'p-value' = p_values) %>% drop_na() %>% arrange(p_values)
+
+for (i in 1:5){
+  plts <- ggplot(data = split_parameters_with_clinical[[anova_result[i,"combi"][[1]]]], aes(x=subtype, y=shape)) +
+  geom_boxplot() + ggtitle(paste(anova_result[i,"combi"][[1]], ' with p value:', round(anova_result[i,"p-value"][[1]],5)))
+  
+  
+  
+  print(plts)
+}
+
+  
+```
+
+```{r}
+
+p_values = c()
+for (c in 1:length(split_parameters_with_clinical)){
+  tryCatch({
+  one_way <- aov(scale ~ subtype, data = split_parameters_with_clinical[[c]])
+  p_value <- summary(one_way)[[1]][["Pr(>F)"]][1]
+  }, error=function(e){p_value = NA})
+  
+  p_values <- append(p_values, p_value)
+}
+
+anova_result <- tibble('combi'= names(split_parameters_with_clinical), 'p-value' = p_values) %>% drop_na() %>% arrange(p_values)
+
+for (i in 1:5){
+  plts <- ggplot(data = split_parameters_with_clinical[[anova_result[i,"combi"][[1]]]], aes(x=subtype, y=scale)) +
+  geom_boxplot() + ggtitle(paste(anova_result[i,"combi"][[1]], ' with p value:', round(anova_result[i,"p-value"][[1]],5)))
+  
+  print(plts)
+}
+
+
+```
+
