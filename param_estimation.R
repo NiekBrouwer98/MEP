@@ -1,23 +1,22 @@
 # Required packages for code
 library(tidyverse)
-library(ggpubr)
-library(readxl)
-library(reshape2)
-library(dbscan)
-library(broom)
-library(zoo)
-library(knitr)
+# library(ggpubr)
+# library(readxl)
+# library(reshape2)
+# library(dbscan)
+# library(broom)
+# library(zoo)
+# library(knitr)
 library(magrittr)
-library(NMF,quietly = T)
-library(MASS)
-library(car)
-library(stats)
-library(foreach)
-library(spatstat)
+# library(NMF,quietly = T)
+# library(MASS)
+# library(car)
+# library(stats)
+# library(spatstat)
 # library(raster)
 library(nlme)
 library(dplyr)
-library(gridExtra)
+# library(gridExtra)
 library(here)
 library(tictoc)
 
@@ -27,21 +26,20 @@ library(doMC)
 cores = detectCores()
 registerDoMC(14)
 
-source(here("UtilityFunctions.R"))
+source("/opt/home/MEP/UtilityFunctions.R")
 library(fst)
 library(data.table)
-library(ggplot2)
-library(assertthat)
 library(R.utils)
+# library(ggplot2)
 
 
 # Load datasets
-initial_params_folder <- here('scratch/init_parameters')
-n_cells <- readRDS(here('scratch/n_cells.rds'))
-xy_data_exc_oct <- readRDS(here('scratch/xy_data_exc_oct.rds'))
+initial_params_folder <- '/opt/home/MEP/scratch/init_parameters'
+n_cells <- readRDS('/opt/home/MEP/scratch/n_cells.rds')
+xy_data_exc_oct <- readRDS('/opt/home/MEP/scratch/xy_data_exc_oct.rds')
 
 # Define phenotype combinations to study in data
-combinations <- readRDS(here('scratch/combinations_selection.rds'))
+combinations <- readRDS('/opt/home/MEP/scratch/combinations_selection.rds')
 # combinations_selection <- combinations
 # combinations_selection <- c("CK8-18^{+} ER^{hi}_to_CK8-18^{+} ER^{hi}") #for debugging
 
@@ -62,7 +60,7 @@ combinations <- readRDS(here('scratch/combinations_selection.rds'))
 # other_combinations <- combinations[which(!combinations %in% first_combinations)]
 # combinations_selection <- c(first_combinations, other_combinations)
 
-finished_files <- list.files(here('scratch/success_models_secondrun/'))
+finished_files <- list.files('/opt/home/MEP/scratch/success_models_secondrun/')
 finished_combinations_int <-  finished_files %>% str_replace("success_models_", "")
 finished_combinations_dir <- finished_combinations_int %>% str_replace(".rds", "")
 finished_combinations <- unique(finished_combinations_dir)
@@ -183,7 +181,7 @@ xy_data_weib <- xy_data_exc_oct %>% slice(0)
 xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 
 # Directory for intermediate results
-dir.create(here('scratch/success_models_secondrun'))
+# dir.create('/opt/home/MEP/scratch/success_models_secondrun')
 
 success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi){
   tryCatch({
@@ -225,7 +223,7 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
         # result <- setNames(result, combi)
 
         #Save intermediate result
-        saveRDS(result, file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
+        saveRDS(result, file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
 
         return(list())
       }
@@ -233,11 +231,11 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
   }
     
     # Parameter estimation failed
-    saveRDS(list('FAILEDESTIMATION',list(),list()), file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
+    saveRDS(list('FAILEDESTIMATION',list(),list()), file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
     return(list())
     
   }, timeout=3600)}, error = function(ex){
-    saveRDS(list('TIMEOUT',list(),list()), file = here(paste('scratch/success_models_secondrun/success_models_', combi, '.rds', sep = '')))
+    saveRDS(list('TIMEOUT',list(),list()), file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
     return(list())
   }) #Set timeout time (60 min = 3600)
   

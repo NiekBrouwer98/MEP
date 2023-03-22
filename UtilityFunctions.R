@@ -85,7 +85,7 @@ getPanel <- function(){
 #'
 #'@return data.table of formatted clincial data
 getClinical <- function() {
-  clinical <- read_fst(here('IMCClinical.fst'), as.data.table = T)
+  clinical <- read_fst(here('DATA/IMCClinical.fst'), as.data.table = T)
   return(clinical)
 }
 
