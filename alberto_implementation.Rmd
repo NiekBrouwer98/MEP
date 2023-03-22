@@ -16,7 +16,7 @@ In this document we apply the method developed by Gil-Jimenez et al. to the META
 
 library(here)
 library(fst)
-library(data.table)
+# library(data.table)
 library(ggplot2)
 library(assertthat)
 source(here("UtilityFunctions.R"))
@@ -63,7 +63,6 @@ Alberto uses two input files:
 
 We miss some of this information. We only have cell centroid coordinates and we don't have tissue area.
 
-
 ```{r filtering and cleaning}
 # Rename labels to fit methods of Alberto
 cells <- cells %>% rename(tnumber = ImageNumber)
@@ -74,56 +73,6 @@ cells <- cells %>% rename(Ycenter = Location_Center_Y)
 # Remove unncessary attributes
 cells <- cells[,c("tnumber", "ObjectNumber", "Xcenter", "Ycenter", "phenotype", "AreaShape_Area")]
 ```
-
-```{r data exploration}
-counts <- cells %>% count(tnumber, phenotype)
-#Calculate median value
-counts%>%
-group_by(phenotype)%>% 
-summarise(Mean=mean(n), Max=max(n), Min=min(n), Median=median(n), Std=sd(n))
-
-LowDF <- counts%>%
-group_by(phenotype)%>% filter(median(n) <= 20)
-HighDF <- counts%>%
-group_by(phenotype)%>% filter(median(n) > 20)
-
-ggplot(counts) + geom_bar(aes(x=phenotype, y=n, fill=tnumber), stat="identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
-
-ggplot(counts, aes(x=phenotype, y=n)) + 
-    geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
-
-ggplot(HighDF, aes(x=phenotype, y=n)) +
-  geom_boxplot(outlier.shape = NA) + coord_cartesian(ylim =  c(0, 300)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Phenotypes with high number of cells")
-
-ggsave(here('output/boxplot_nphenotypes_metabric.jpg'))
-
-ggplot(LowDF, aes(x=phenotype, y=n)) +
-  geom_boxplot(outlier.shape = NA) + coord_cartesian(ylim =  c(0, 300)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Phenotypes with low number of cells")
-
-ggsave(here('output/boxplot_nphenotypes_metabric2'))
-
-
-```
-Compare this to nabucco data:
-
-```{r}
-nabucco_data <- read_tsv(here('DATA/nabucco_1_densities.tsv'))
-
-ggplot(nabucco_data) + geom_bar(aes(x=phenotype, y=n, fill=tnumber), stat="identity") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
-
-ggplot(nabucco_data, aes(x=phenotype, y=n))+
-    geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
-
-nabucco_data_stromal <- nabucco_data %>% filter(!phenotype %in% c('negative'))
-
-ggplot(nabucco_data_stromal, aes(x=phenotype, y=n)) + coord_cartesian(ylim =  c(0, 7000)) + 
-    geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Number of cells per phenotype")
-
-ggsave(here('output/boxplot_nphenotypes_nabucco.jpg'))
-
-```
-
-
 
 Compute all 1-NN distances.
 
@@ -213,6 +162,8 @@ dfl3$Distance <- (dfl3$Distance + 1)
 
 NNdistances <- dfl3
 
+saveRDS(NNdistances, file=here('scratch/NNdistances.rds'))
+
 # free up some memory. these temps are no longer needed
 rm(dfl)
 rm(dfl2)
@@ -221,6 +172,7 @@ gc() # do garbage collection to free up memory
 ```
 
 ### Boxplot of distances
+
 ```{r}
 ggplot(NNdistances, aes(x=phenotype_from, y=Distance)) + 
     geom_boxplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
@@ -312,9 +264,8 @@ write_delim(AUCScaledSlides_300 %>%
 toc()
 ```
 
-
-## Parameter estimation
-From the distance bin collection, we try to estimate a distribution.
+## Parameter initialization
+From the distance bin collection, we try to estimate initial parameters with the fitdist packages. This sometimes gives very bad estimates, but speeds up the NLME model computation later on.
 
 ```{r load packages 2, message=FALSE, warning=FALSE}
 invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE))
@@ -342,7 +293,7 @@ source(here("UtilityFunctions.R"))
 ```
 
 
-```{r estimate parameters}
+```{r initialize parameters}
 tic('parameter initialization')
 all_distances_data <- read_delim(here('scratch/AUCScaledSlides_300.tsv'),delim='\t',
                                  col_types=list(tumor_stroma=col_character()))
@@ -450,7 +401,7 @@ for (t in samples){
 ```
 
 
-## Fitting NLME model
+## Parameter estimation
 Now we fit a Weibull function using a nonlinear-mixed fixed effect model to the 1-NN distance distribution.
 
 ```{r load packages 3, message=FALSE, warning=FALSE}

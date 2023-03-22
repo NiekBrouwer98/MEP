@@ -2,20 +2,31 @@
 title: "alberto_results"
 author: "Niek Brouwer"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    code_folding: "hide"
+params:
+  save_files:
+    value: FALSE
+    choices:
+      - FALSE
+      - TRUE
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-```{r}
+
+In this document we analyse the results from the Weibull parameter estimation on the METABRIC dataset.
+
+```{r, include=FALSE}
 library(here)
 library(ggplot2)
 library(tidyverse)
 library(ggrepel)
 library(fst)
 source(here("UtilityFunctions.R"))
-library(Hmisc)
+# library(Hmisc)
 library(knitr)
 library(tidyverse)
 library(corrplot)
@@ -25,6 +36,10 @@ library(grid)
 library(ComplexHeatmap)
 library(tidyHeatmap)
 library(umap)
+library(circlize)
+library(dplyr)
+library(ggsignif)
+library(ggpubr)
 ```
 
 
@@ -54,22 +69,33 @@ get_parameters <- function(path){
   return(params_result)
 }
 
-all_parameters_firstrun <- get_parameters(here('scratch/success_models/')) %>%
+
+get_all_parameters <- function(save){
+  all_parameters_firstrun <- get_parameters(here('scratch/success_models/')) %>%
   separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
   filter(a > 0.5) %>%
   filter(b > 8) %>%
   rename(shape =a , scale = b) %>%
   unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+  
+  all_parameters_secondrun <- get_parameters(here('scratch/success_models_secondrun/')) %>%
+    separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
+    filter(a > 0.5) %>%
+    filter(b > 8) %>%
+    rename(shape =a , scale = b) %>%
+    unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+  
+  #Bind both results
+  all_parameters <- rbind(all_parameters_secondrun, all_parameters_firstrun %>% filter(! unique_sample %in% all_parameters_secondrun$unique_sample))
+  if(save){
+    saveRDS(all_parameters, file = here('scratch/all_parameters.rds'))
+  }
+  return(all_parameters)
+}
 
-all_parameters_secondrun <- get_parameters(here('scratch/success_models_secondrun/')) %>%
-  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
-  filter(a > 0.5) %>%
-  filter(b > 8) %>%
-  rename(shape =a , scale = b) %>%
-  unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+# all_parameters <- get_all_parameters(save=TRUE)
 
-#Bind both results
-all_parameters <- rbind(all_parameters_secondrun, all_parameters_firstrun %>% filter(! unique_sample %in% all_parameters_secondrun$unique_sample))
+all_parameters <- read_rds(here('scratch/all_parameters.rds'))
 
 # Compute means of each combination
 means <- all_parameters %>% 
@@ -86,14 +112,29 @@ all_distances_data <- all_distances_data %>% as_tibble %>%
   mutate(new =round(new))
 
 cells <- getCells()
-clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
-clinical_data <- merge(x= clinical_data, unique(cells %>% select(c(ImageNumber, metabric_id))), by='metabric_id', all.x=T)
+clinical_data_Danenberg <- read_csv(here('DATA/IMCClinical.csv')) # use more extensive clinical data
+clinical_data <- read_tsv(here('DATA/brca_metabric_clinical_data.tsv'))
+clinical_data <- merge(x= clinical_data, unique(cells %>% select(c(ImageNumber, metabric_id))), by.x='Sample ID',by.y='metabric_id', all.y=T)
+clinical_data <- merge(x=clinical_data, y= clinical_data_Danenberg %>% select(c(metabric_id, IntClust)),by.x='Sample ID', by.y='metabric_id',all.x=T)
+
+cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
+                count(ImageNumber, meta_description) %>%
+                rename(tnumber=ImageNumber)
+
+cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>% mutate(n = coalesce(n, 0))
 
 ```
 
-
 ## Initial parameters
-Retrieve initial parameters to find parameters that could not be estimated. 
+Prior to parameter estimation, parameters are initialized on data on the [0,100] interval using the 'fitdist' package. This is a quick and sloppy estimation.
+
+Samples can be divided into four categories:
+1. No initialization and no estimation possible (combination does not occur)
+2. No initialization, but estimation (distances outside [0,100] interval or initialization exceeded time)
+3. Initialization, but no estimation (Not possible to fit Weibull distribution)
+4. No initialization and no estimation, although combination is present.
+
+This last category requires more analyses to find out why the estimation failed.
 
 ```{r}
 initial_parameters <- tibble()
@@ -112,39 +153,113 @@ initial_parameters <- merge(x= initial_parameters %>%
                               rename(scale = estimate),
                             by.x=c('tnumber', 'combo'), 
                             by.y= c('tnumber', 'combo')) %>%
-                      unite('unique_sample', c(tnumber, combo), remove=FALSE) %>% 
+                      unite('unique_sample', c(tnumber, combo), remove=FALSE) %>%
                       separate(combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove=FALSE) %>% 
                       rename(phenotype_combo = combo)
 
 not_estimated_samples <- initial_parameters  %>% filter(! unique_sample %in% all_parameters$unique_sample)
 not_initialized_samples <- all_parameters %>% filter(unique_sample %in% setdiff(all_parameters$unique_sample, intersect(initial_parameters$unique_sample, all_parameters$unique_sample)))
 
-print(paste('Number of samples from which the parameters are initialized: ', nrow(initial_parameters)))
-print(paste('Number of samples from which the parameters are estimated: ', nrow(all_parameters)))
-print(paste('Number of samples from which the parameters are not estimated: ', nrow(not_estimated_samples)))
+expand_cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description, meta_description), cell_counts, by.x= c('tnumber',"meta_description...2"), 
+                         by.y = c('tnumber',"meta_description"), all.x = TRUE) %>% 
+                  mutate(n = coalesce(n, 0)) %>% rename(phenotype_from = meta_description...2) %>% 
+  rename(phenotype_to = meta_description...3) %>% rename(n_from =n)
+
+cell_occurences_combinations <- merge(expand_cell_occurences, cell_counts, by.x= c('tnumber',"phenotype_to"), by.y = c('tnumber',"meta_description"), all.x = TRUE) %>%
+  mutate(n = coalesce(n, 0)) %>% rename(n_to = n) %>%
+  unite('phenotype_combo', c(phenotype_from, phenotype_to), sep= '_to_', remove=F) %>%
+  unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+
+all_possible_samples <- cell_occurences_combinations %>% filter(n_to > 0 & n_from > 0)
+
+not_estimated_and_initialized_samples <- cell_occurences_combinations %>% filter(! unique_sample %in% all_parameters$unique_sample) %>% filter(! unique_sample %in% initial_parameters$unique_sample) %>% filter(n_to > 0 & n_from > 0)
+
+print(paste('Number of samples possible to estimate (combination exists):', nrow(all_possible_samples)))
+print(paste('Total number of samples from which the parameters are initialized:', nrow(initial_parameters), '(', round(nrow(initial_parameters)*100/nrow(all_possible_samples),2), '%)'))
+print(paste('Total number of samples from which the parameters are estimated:', nrow(all_parameters), '(', round(nrow(all_parameters)*100/nrow(all_possible_samples),2), '%)'))
+print(paste('Number of samples from which the parameters are not estimated and not initialized:', nrow(not_estimated_and_initialized_samples),'(', round(nrow(not_estimated_and_initialized_samples)*100/nrow(all_possible_samples),2), '%)'))
 
 
+
+```
+How many combinations have a valid number of estimations? 
+
+```{r}
+print(nrow(all_parameters %>% count(phenotype_combo) %>% filter(n > 50)))
 ```
 
 ## Failed parameter estimations
-Which combinations could not be estimated?
+Which combinations could not be estimated at all?
 
 ```{r}
 not_estimated_combinations <- setdiff(combinations, unique(all_parameters$phenotype_combo))
-message('combinations that could not be estimated at all:')
 print(str_sort(not_estimated_combinations))
 ```
 
-Take a look at the slides of the samples that were not estimated and look at samples that were not initialized.
+
 
 ```{r}
 show_sample <- function(sample){
-  sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample_points$tnumber) %>% filter(phenotype_combo %in%
-                                                                                                                 sample_points$phenotype_combo),
-                              y = sample_points %>% select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+  sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
+                                                                                                                 sample$phenotype_combo),
+                              y = sample %>% select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+  
+  dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) + geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5) +
+  stat_function(fun = dweibull, args = list(shape = sample['shape'][[1]], scale = sample['scale'][[1]]))+
+  xlim(0,300) + theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
+  
+  slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
+                 filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]])) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample['tnumber'][[1]]))
+
+return(plot_grid(dist, slide,ncol=2))
+                         
+}
+```
+
+Look at the slides of the samples that were not estimated, but initialized.
+
+```{r}
+sample_points_notest <- sample_n(not_estimated_samples, 5)
+
+for (row in 1:nrow(sample_points_notest)){
+  print(show_sample(sample_points_notest[row,]))
+}
+
+if (params$save_files){
+ggsave(here('output/Missing_estimations_analysis/not_estimated_samples.pdf'), plot = plot_grid(show_sample(sample_points_notest[1,]),show_sample(sample_points_notest[2,]),show_sample(sample_points_notest[3,]),
+          show_sample(sample_points_notest[4,]),show_sample(sample_points_notest[5,]), ncol=1), width= 10, height=20 )
+}
+  
+```
+
+Look at the slides of the samples that were not initialized, but estimated.
+
+```{r}
+
+sample_points_notinit <- sample_n(not_initialized_samples, 5)
+
+for (row in 1:nrow(sample_points_notinit)){
+  print(show_sample(sample_points_notinit[row,]))
+
+}
+
+if (params$save_files){
+ggsave(here('output/Missing_estimations_analysis/not_init_samples.pdf'), plot = plot_grid(show_sample(sample_points_notinit[1,]),show_sample(sample_points_notinit[2,]),show_sample(sample_points_notinit[3,]),
+          show_sample(sample_points_notinit[4,]),show_sample(sample_points_notinit[5,]), ncol=1), width= 10, height=20 )
+}
+
+```
+
+Look at the slides of the samples that were not initialized and not estimated.
+
+```{r}
+show_sample_without_estimate <- function(sample){
+  sample_distance_data <- all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
+                                                                                                                 sample$phenotype_combo)
   
   dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) +   geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5) +
-  stat_function(fun = dweibull, args = list(shape = sample['shape'][[1]], scale = sample['scale'][[1]]))+
   xlim(0,300) + theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
   
   slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
@@ -155,91 +270,212 @@ show_sample <- function(sample){
 return(plot_grid(dist, slide))
                          
 }
+sample_points_notinit_and_notest <- sample_n(not_estimated_and_initialized_samples, 5)
 
-sample_points_notinit <- sample_n(not_initialized_samples, 5)
-sample_point_notest <- sample_n(not_estimated_samples, 5)
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(show_sample_without_estimate(sample_points_notinit_and_notest[row,]))
 
-message('Not initialized:')
-for (row in 1:nrow(sample_points_notinit)){
-  print(show_sample(sample_points_notinit[row,]))
 }
 
-message('Not estimated:')
-for (row in 1:nrow(sample_point_notest)){
-  print(show_sample(sample_points_notest[row,]))
+if (params$save_files){
+ggsave(here('output/Missing_estimations_analysis/not_init_and_estimated_samples.pdf'), plot = plot_grid(show_sample_without_estimate(sample_points_notinit_and_notest[1,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[2,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[3,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[4,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[5,]), ncol=1), width= 10, height=20 )
 }
 
 ```
 
+We would like to find out why our method fails in initializing and estimating certain samples.
+A possible explanation is that the combination exist, but is very rare.
 
-The combinations that could not be estimated are possibly very rare. Investigate the cell counts of these combinations.
+**Haakje: Zijn de samples met hoge counts in cell types met veel 0 counts, verrijkt in bepaaplde subtypes of iets dergelijks?**
 
 ```{r}
-# Barplot of cell type occurences in combinations
-not_estimated_combinations_df <- tibble(combo = not_estimated_combinations) %>%
-  separate(combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove=FALSE)
 
-not_estimated_counts <- rbind(not_estimated_combinations_df %>% count(phenotype_from) %>% rename(phenotype = phenotype_from) %>% mutate(type = 'from'), 
-                              not_estimated_combinations_df %>% count(phenotype_to)%>% rename(phenotype = phenotype_to) %>% mutate(type = 'to'))
+not_estimated_counts <- not_estimated_and_initialized_samples  %>% count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
 
-not_estimated_counts_all <- merge(not_estimated_counts %>% expand(phenotype, type), not_estimated_counts, all.x=TRUE) %>%
-                  mutate(n = coalesce(n, 0))
-                              
-ggplot(data=not_estimated_counts_all) + geom_bar(aes(x=reorder(phenotype, n), y=n, fill=type), stat='identity', position = position_dodge(), alpha = 0.75) + theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
-  ggtitle('Cell type occurences in combinations that could not be estimated') + ylab('n') + xlab('')
+not_estimated_matrix <- matrix(not_estimated_counts %>% pull(n), byrow = T, nrow = length(unique(not_estimated_counts %>% pull(phenotype_from))),
+                                dimnames = list(unique(not_estimated_counts %>% pull(phenotype_from)), 
+                                                unique(not_estimated_counts %>% pull(phenotype_to))))
 
-ggsave(paste(here('output/Alberto_results/'), 'notestimatedoccurences.pdf', sep=''))
+hm  <- Heatmap(not_estimated_matrix,
+               name = 'number of \n unestimated samples', column_title = 'phenotype_to', row_title = 'phenotype_from',
+                row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6),
+                cluster_rows = T, cluster_columns =  T)
 
-###
-cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
-                count(ImageNumber, meta_description) %>%
-                rename(tnumber=ImageNumber) %>% mutate(type = ifelse(meta_description %in% not_estimated_combinations_df$phenotype_from &
-                                                                       meta_description %in% not_estimated_combinations_df$phenotype_to, 'from & to', 
-                                                                     ifelse(meta_description %in% not_estimated_combinations_df$phenotype_from, 'from',
-                                                                      ifelse(meta_description %in% not_estimated_combinations_df$phenotype_to, 'to','not'))))
+print(hm)
+if (params$save_files){
+save_pdf(hm, here('output/Missing_estimations_analysis/notestimatedcounts.pdf'), width=10, height=6)
+}
 
-group_ordered <- with(cell_counts, reorder(meta_description,n,median))
-
-cell_counts_ordered <- cell_counts
-cell_counts_ordered$meta_description <- factor(cell_counts_ordered$meta_description,levels = levels(group_ordered))
+medians_from <- not_estimated_and_initialized_samples %>% group_by(phenotype_from) %>% summarise(median = median(n_from))
+medians_to <- not_estimated_and_initialized_samples %>% group_by(phenotype_to) %>% summarise(median = median(n_to))
 
 
-ggplot(cell_counts_ordered, aes(x=meta_description,n,y=n, fill=type)) + 
-  geom_boxplot(outlier.shape = NA) + theme_bw() +
-  scale_fill_manual(values=c("darkgrey", 'red', 'white',"lightgrey")) +
-  scale_y_continuous(limits = quantile(cell_counts_ordered$n, c(0.1, 0.9))) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
-  ggtitle('Cell type counts per sample') + guides(fill=guide_legend(title="cell type combination")) + xlab('')
+ggplot(data=not_estimated_and_initialized_samples) + geom_boxplot(aes(x=phenotype_from, y=n_from))  + theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_text(data=medians_from, aes(x=phenotype_from,y=median, label=median), 
+              size = 3, vjust = -15,color='red') + ggtitle('cell type count with medians in red')
 
-ggsave(paste(here('output/Alberto_results/'), 'cellcounts_boxplot.pdf', sep=''))
+if (params$save_files){
+ggsave(paste(here('output/Missing_estimations_analysis/'), 'notestimatedcounts_boxplot1.pdf', sep=''))
+}
 
+ggplot(data=not_estimated_and_initialized_samples) + geom_boxplot(aes(x=phenotype_to, y=n_to))  + theme_bw() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + geom_text(data=medians_to, aes(x=phenotype_to,y=median, label=median), 
+              size = 3, vjust = -15,color='red') + ggtitle('cell type count with medians in red')
 
-###
-cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>%
-                  mutate(n = coalesce(n, 0)) %>%
-                  mutate(category = ifelse(n==0,'0', ifelse(n<10, '0<10', ifelse(n<50,'10<50','>50')))) %>% group_by(meta_description) %>%
-                  count(category)
-
-
-lvls <- cell_occurences %>% filter(category == '0') %>% arrange(desc(n)) %>% pull(meta_description)
-a <- ifelse(lvls %in% unique(not_estimated_combinations_df$phenotype_from), "red", "black")
-
-#Haakje: Zijn de samples met hoge counts in cell types met veel 0 counts, verrijkt in bepaaplde subtypes of iets dergelijks?
-ggplot(cell_occurences, aes(x=factor(meta_description, level = lvls), y=n, fill=factor(category, levels=c('>50','10<50','0<10','0')))) + 
-    geom_bar(position="fill", stat="identity") + theme_bw()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, colour=a)) + 
-  ggtitle('Cell type counts in samples') + ylab('percentage') + xlab('')+ guides(fill=guide_legend(title="occurences"))
-
-ggsave(paste(here('output/Alberto_results/'), 'cellcounts_stackedbarplot_withmissedcombis.pdf', sep=''))
+if (params$save_files){
+ggsave(paste(here('output/Missing_estimations_analysis/'), 'notestimatedcounts_boxplot2.pdf', sep=''))
+}
 
 
 ```
+
+There are still samples with high counts, but without estimation.
+
+```{r}
+print(paste('Number of unestimated samples with phenotype_to or phenotype_from > 1000:', nrow(not_estimated_and_initialized_samples %>% filter(n_from > 1000 | n_to > 1000))))
+sample_points_notinit_and_notest <- sample_n(not_estimated_and_initialized_samples %>% filter(n_from > 1000 | n_to > 1000),5)
+
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(show_sample_without_estimate(sample_points_notinit_and_notest[row,]))
+}
+
+if (params$save_files){
+ggsave(here('output/Missing_estimations_analysis/one_count_high_failed_samples.pdf'), plot = plot_grid(show_sample_without_estimate(sample_points_notinit_and_notest[1,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[2,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[3,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[4,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[5,]), ncol=1), width= 10, height=20 )
+}
+```
+
+There are also samples with high counts of both from and to cell type.
+
+```{r}
+print(paste('Number of unestimated samples with both phenotype_to and from count 50+ :', nrow(not_estimated_and_initialized_samples %>% filter(n_from > 50 & n_to > 50))))
+sample_points_notinit_and_notest <- not_estimated_and_initialized_samples %>% filter(n_from > 50 & n_to > 50)
+
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(show_sample_without_estimate(sample_points_notinit_and_notest[row,]))
+}
+  
+if (params$save_files){
+ggsave(here('output/Missing_estimations_analysis/both_count_high_failed_samples1.pdf'), plot = plot_grid(show_sample_without_estimate(sample_points_notinit_and_notest[1,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[2,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[3,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[4,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[5,]), ncol=1), width= 10, height=20)
+  
+ggsave(here('output/Missing_estimations_analysis/both_count_high_failed_samples2.pdf'), plot = plot_grid(
+  show_sample_without_estimate(sample_points_notinit_and_notest[6,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[7,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[8,]),
+            show_sample_without_estimate(sample_points_notinit_and_notest[9,]),
+          show_sample_without_estimate(sample_points_notinit_and_notest[10,]), ncol=1), width= 10, height=20 )
+}
+
+```
+### Exploration of unestimated samples
+
+Are the distributions of unestimated samples with high counts very different from the other distributions?
+
+```{r}
+estimated_distances <- all_distances_data %>%
+unite('unique_sample', c(tnumber, phenotype_combo), remove=F) %>% filter(unique_sample %in% all_parameters$unique_sample)
+
+compare_samples <- function(highlight_tnumber, c){
+  dist <- bind_rows(estimated_distances %>% filter(phenotype_combo == c) %>% group_by(distance_window)%>% dplyr::summarize(N.per.mm2.scaled = mean(N.per.mm2.scaled)) %>%
+                      mutate(plot = 'estimated'), all_distances_data %>% filter((tnumber == highlight_tnumber & phenotype_combo == c)) %>% mutate(plot = 'not estimated')) %>%
+  ggplot(aes(x=distance_window, y=N.per.mm2.scaled, fill=plot)) +
+  geom_bar(,stat="identity", position = position_identity(), alpha=0.5) + theme_bw() + 
+    ggtitle(paste(c, '(', length(unique(estimated_distances %>% filter(phenotype_combo == sample_points_notinit_and_notest[row,]['phenotype_combo'][[1]]) %>% pull(tnumber))), 'estimates)'))
+
+return(dist)
+}
+
+sample_points_notinit_and_notest <- not_estimated_and_initialized_samples %>% filter(n_from > 50 & n_to > 50)
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(compare_samples(sample_points_notinit_and_notest[row,]['tnumber'][[1]],sample_points_notinit_and_notest[row,]['phenotype_combo'][[1]] ))
+}
+
+```
+
+Are specific low counts correlated with  cancer subtype?
+
+```{r}
+heatmap_occurences <- function(dataset, occ_number, subtype){
+  cell_occurences_categories <- dataset %>% mutate(category = ifelse(n_to > occ_number & n_from> occ_number, paste(as.character(occ_number),'+',sep=''), as.character(occ_number))) %>%
+                                                                       group_by(phenotype_from, phenotype_to) %>%
+                                                                                      count(category) %>% 
+                                                                      mutate(n = n/ length(unique(dataset %>% pull(tnumber))))
+  
+  df <- cell_occurences_categories %>% filter(category == paste(as.character(occ_number),'+',sep=''))
+
+  trans_df <- xtabs(n ~ phenotype_from + phenotype_to, df)
+  hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = T, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6),
+                name = paste('sample percentage \n of type', subtype, '\n with', paste(as.character(occ_number),'+',sep=''), 'occ.'), column_title = 'phenotype_to', row_title = 'phenotype_from')
+  
+  print(hm)
+  
+  # if (params$save_files){
+  # save_pdf(hm,paste('occurence_heatmap_type_', subtype,.pdf,sep='') width=6, height=4)
+  # }
+}
+
+heatmap_occurences(cell_occurences_combinations, 0,'ALL')
+subtypes = group_split(clinical_data %>% group_by(PAM50))
+for (s in 1:length(subtypes)){
+  subtype = subtypes[[s]]
+  heatmap_occurences(cell_occurences_combinations %>% filter(tnumber %in% subtype$ImageNumber), 0,unique(subtype$PAM50))
+}
+
+get_combination_occurences <- function(){
+  parameters_with_subtypes <- merge(all_parameters, clinical_data %>% select(c("ImageNumber", "Pam50 + Claudin-low subtype", "HER2 Status", "ER Status", "PR Status")), by.x='tnumber', by.y='ImageNumber')
+  
+  combination_occurences <- (parameters_with_subtypes %>% group_by(`Pam50 + Claudin-low subtype`, phenotype_combo) %>% summarise(n = n())) %>% rename(PAM50 = `Pam50 + Claudin-low subtype`) %>% separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+  subtype_count <- clinical_data %>% group_by(`Pam50 + Claudin-low subtype`) %>% summarise(n_proportion = n()/794)
+
+  combination_occurences <- merge(merge(combination_occurences, combination_occurences %>% group_by(phenotype_combo) %>% summarise(n_total = sum(n)), by='phenotype_combo'), subtype_count, by.x='PAM50', by.y='Pam50 + Claudin-low subtype') %>% mutate(expected_n = (n_proportion) * n_total)
+
+  return(combination_occurences)
+}
+
+combination_occurences <- get_combination_occurences()
+
+lvls <- combination_occurences %>% group_by(phenotype_from) %>% summarise(n=n()) %>% arrange(n) %>% pull(phenotype_from)
+
+ggplot(data=combination_occurences) + geom_bar(aes(x=factor(phenotype_from, levels=lvls), y=n, fill=PAM50), stat="identity",position='fill') + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7)) + facet_wrap(vars(phenotype_to), ncol = 8) + xlab('phenotype_from')
+
+if (params$save_files){
+ggsave(here('output/estimation_counts.pdf'), height=20, width=30)
+}
+
+ggplot(data=combination_occurences %>% filter(n_total > (794*0.5))) + geom_bar(aes(x=factor(phenotype_from, levels=lvls), y=n, fill=PAM50), stat="identity",position='fill') + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7)) + facet_wrap(vars(phenotype_to), ncol = 8) + xlab('phenotype_from')
+
+if (params$save_files){
+ggsave(here('output/estimation_counts_50percent.pdf'), height=20, width=30)
+}
+
+dominant_estimations <- unique(combination_occurences %>% filter(n_total > (794*0.5)) %>% filter(n  > (expected_n*2) | n  < (expected_n*(1/2)))%>% pull(phenotype_combo))
+
+ggplot(data=combination_occurences %>% filter(phenotype_combo %in% dominant_estimations)) + geom_bar(aes(x=factor(phenotype_from, levels=lvls), y=n, fill=PAM50), stat="identity",position='fill') + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size=7)) + facet_wrap(vars(phenotype_to), ncol = 8) + xlab('phenotype_from')
+
+if (params$save_files){
+ggsave(here('output/dominant_estimation_counts.pdf'), height=20, width=30)
+}
+
+``` 
+
 
 ## Estimated parameters
 Do the parameters look like a C-curve?
 
-```{r plot all parameters, echo=FALSE}
+```{r plot all parameters}
 ggplot(data = means, aes(x=mean_shape, y=mean_scale, label=paste(phenotype_from, '_to_', phenotype_to, sep=''))) +
   geom_point(data = all_parameters, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
   geom_density_2d(data = all_parameters, aes(x=shape, y=scale)) +
@@ -248,7 +484,9 @@ ggplot(data = means, aes(x=mean_shape, y=mean_scale, label=paste(phenotype_from,
   scale_y_log10() +
   xlab('Shape') + ylab('Scale') + ggtitle("Parameters with densities")
 
-ggsave(paste(here('output/Alberto_results/'), 'allparameters_withdensities.pdf', sep=''))
+if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'), 'allparameters_withdensities.pdf', sep=''))
+  }
 
 ggplot() +
   geom_point(data = all_parameters %>% mutate(type='individual parameters'), aes(x=shape, y=scale, color=type), alpha=0.1, size=0.5) +
@@ -261,7 +499,9 @@ ggplot() +
   xlab('Shape') + ylab('Scale') +ggtitle("Parameters with means")  + 
   guides(colour = guide_legend(override.aes = list(size=10)))
 
-ggsave(paste(here('output/Alberto_results/'), 'allparameters_withmeans.pdf', sep=''))
+if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'), 'allparameters_withmeans.pdf', sep=''))
+}
 
 Alberto_parameters <- read_tsv(here('DATA/global_weib_coeff_oct.tsv')) %>% mutate(type='NABUCCO')
 
@@ -275,7 +515,9 @@ ggplot() +
   xlab('Shape') + ylab('Scale') + ggtitle("METABRIC and NABCUCCO parameters")  + 
   guides(colour = guide_legend(override.aes = list(size=10)))
 
-ggsave(paste(here('output/Alberto_results/'), 'allparameters_withNABUCCO.pdf', sep=''))
+if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'), 'allparameters_withNABUCCO.pdf', sep=''))
+}
 
 # all_parameters <- merge(x = all_parameters, y=clinical_data %>% select(c(ImageNumber, PAM50)), by.x='tnumber', by.y='ImageNumber', all.x=T)
 
@@ -287,12 +529,14 @@ ggsave(paste(here('output/Alberto_results/'), 'allparameters_withNABUCCO.pdf', s
 #   scale_y_log10() +
 #   xlab('Shape') + ylab('Scale') + ggtitle("Parameters of PAM50 subtypes")  + 
 #   guides(colour = guide_legend(override.aes = list(size=10)))
-# 
-# ggsave(paste(here('output/Alberto_results/'), 'allparameters_withPAM50subtypes.png', sep=''))
+
+#   if (params$save_files){
+# ggsave(paste(here('output/Alberto_reproduction/'), 'allparameters_withPAM50subtypes.png', sep=''))
+# }
 
 ```
 
-Make histograms of curve extremes.
+Look at the extremes of the curve.
 
 ```{r}
 # Pick extremes
@@ -318,7 +562,9 @@ ggplot() +
   scale_y_log10() +
   xlab('Shape') + ylab('Scale')
 
-ggsave(paste(here('output/Alberto_results/'), 'extremeparameters.pdf', sep=''), width=6, height=4)
+if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'), 'extremeparameters.pdf', sep=''), width=6, height=4)
+}
 
 ```
 
@@ -331,9 +577,11 @@ ggplot() +
   stat_function(fun = dweibull, args = list(shape = top_left$shape, scale = top_left$scale), aes(colour='high scale, low scale')) +
   stat_function(fun = dweibull, args = list(shape = top_right$shape, scale = top_right$scale), aes(colour='high scale, high shape')) +
   stat_function(fun = dweibull, args = list(shape = belly$shape, scale = belly$scale),aes(colour='belly')) +
-  xlim(0,300) + theme_bw() + xlab('micron') + ylab('N')
+  xlim(0,1000) + theme_bw() + xlab('micron') + ylab('N')
 
-ggsave(paste(here('output/Alberto_results/'), 'weibullcurves.pdf', sep=''),width=10, height=4)
+if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'), 'weibullcurves.pdf', sep=''),width=10, height=4)
+}
 
 ```
 
@@ -358,16 +606,20 @@ print_slide <- function(sample){
 
 
 for (row in 1:nrow(sample_points)){
-  ggsave(here(paste('output/Alberto_results/sample',row, '.pdf', sep='')),
-         (plot_grid(print_distances(sample_points[row,]),print_slide(sample_points[row,]))), 
+  slide <- plot_grid(print_distances(sample_points[row,]),print_slide(sample_points[row,]))
+  print(slide)
+    if (params$save_files){
+  ggsave(here(paste('output/Alberto_reproduction/estimated_sample',row, '.pdf', sep='')),
+         slide,
          width=10, height=4)
+    }
 }
 ```
 
 
-Now look at specific 'X to celltype' parameters.
+Now look at specific 'X to celltype' parameters similar to the paper by Gil-Jimenez et al.
 
-```{r plot subset, echo = FALSE}
+```{r plot subset}
 
 plot_parameters <- function(combi){
   point <- all_parameters %>%
@@ -381,8 +633,9 @@ plot_parameters <- function(combi){
     theme(legend.position='right') + ggtitle(paste('From X to ', combi)) + guides(colour = guide_legend(override.aes = list(size=10)))
   
   print(point)
-
-  ggsave(paste(here('output/Alberto_results/'), gsub("[[:punct:]]", "", combi), '_parameters.pdf', sep=''))
+  if (params$save_files){
+  ggsave(paste(here('output/Alberto_reproduction/'), gsub("[[:punct:]]", "", combi), '_parameters.pdf', sep=''))
+    }
 }
 
 six_combinations <- c('CK8-18^{hi}CXCL12^{hi}', 'B cells','CD4^{+} T cells',
@@ -402,14 +655,15 @@ for (c in six_combinations){
     theme_bw() + ggtitle(paste('From X to ', c))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)))
 
 print(grid)
-ggsave(paste(here('output/Alberto_results/'),'boxplots', gsub("[[:punct:]]", "", c), '.pdf', sep=''))
+    if (params$save_files){
+ggsave(paste(here('output/Alberto_reproduction/'),'boxplots', gsub("[[:punct:]]", "", c), '.pdf', sep=''))
+    }
 }
-
-
 
 ```
 
 Compare the parameters of the six cell types of Alberto with our parameters.
+**Note:** We map the cell types of Alberto to our cell type classification, but both groups are not entirely the same and the cell type groups of Alberto contain more diverse cells.
 
 ```{r}
 NABUCCO_parameters <- Alberto_parameters %>%
@@ -436,144 +690,361 @@ NABUCCO_parameters <- Alberto_parameters %>%
 
 NABUCCO_AND_METABRIC_parameters <- bind_rows(all_parameters %>% select(c(phenotype_from, phenotype_to, shape, scale)) %>%
                                                mutate(type='METABRIC'),
-                                             NABUCCO_parameters)
+                                             NABUCCO_parameters) %>% filter(phenotype_to %in% six_combinations) %>% filter(phenotype_from %in% six_combinations)
+
+res <- wilcox.test(NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_from==six_combinations[1] & phenotype_to==six_combinations[1] & type=='METABRIC') %>% pull(shape),
+                   NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_from==six_combinations[1] & phenotype_to==six_combinations[1] & type=='NABUCCO') %>% pull(shape))
+res
 
 
+# https://rdrr.io/cran/ggsignif/man/stat_signif.html
 for (c in six_combinations){
-  bp <- plot_grid(ggplot(data=NABUCCO_AND_METABRIC_parameters %>%
+  group_ordered_shape <- with(NABUCCO_AND_METABRIC_parameters %>% filter(type=='METABRIC') %>% filter(phenotype_to==c),                       # Order boxes by median
+                      reorder(phenotype_from,
+                              shape,
+                              median))
+
+  data_ordered_shape <- NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_to ==c)
+  data_ordered_shape$phenotype_from <- factor(data_ordered_shape$phenotype_from,
+                               levels = levels(group_ordered_shape))
+  
+  medians_shape <- data_ordered_shape %>% group_by(phenotype_from, type) %>% summarise(median = median(shape)) %>% arrange(factor(phenotype_from, levels = unique(group_ordered_shape)))
+  res_shape <- cor.test(medians_shape %>% filter(type=='METABRIC') %>% pull(median),medians_shape %>% filter(type=='NABUCCO') %>% pull(median), method='spearman')
+  
+  group_ordered_scale <- with(NABUCCO_AND_METABRIC_parameters %>% filter(type=='METABRIC') %>% filter(phenotype_to==c),                       # Order boxes by median
+                    reorder(phenotype_from,
+                            scale,
+                            median))
+
+  data_ordered_scale <- NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_to ==c)
+  data_ordered_scale$phenotype_from <- factor(data_ordered_scale$phenotype_from,
+                               levels = levels(group_ordered_scale))
+  
+  medians_scale <- data_ordered_scale %>% group_by(phenotype_from, type) %>% summarise(median = median(scale)) %>% arrange(factor(phenotype_from, levels = unique(group_ordered_scale)))
+  res_scale <- cor.test(medians_scale %>% filter(type=='METABRIC') %>% pull(median),medians_scale %>% filter(type=='NABUCCO') %>% pull(median),method='spearman')  
+  
+  
+  bp <- plot_grid(ggplot(data=data_ordered_shape %>%
     filter(phenotype_to == c) %>%
     filter(phenotype_from %in% six_combinations)) +
                     geom_boxplot(aes(x=phenotype_from, y=shape, fill=type)) +
-    theme_bw() + ggtitle(paste('From X to ', c))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
-        ggplot(data=NABUCCO_AND_METABRIC_parameters %>%
+    theme_bw() + ggtitle(paste('From X to', c), subtitle= paste('rho:', round(res_shape$estimate[[1]],4)))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + theme(legend.position = "none"),
+    # + stat_compare_means(aes(x=phenotype_from, y=shape, group = type), label = "p.format",size=2)
+
+        ggplot(data=data_ordered_scale%>%
           filter(phenotype_to == c) %>%
           filter(phenotype_from %in% six_combinations)) +
                           geom_boxplot(aes(x=phenotype_from, y=scale, fill=type)) +
-          theme_bw() + ggtitle(paste('From X to ', c))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)))
-  
+          theme_bw() + ggtitle(paste('From X to ', c), subtitle= paste('rho:', round(res_scale$estimate[[1]],4)))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+        # + stat_compare_means(aes(x=phenotype_from, y=scale, group = type), label = "p.format",size=2)
+    ,rel_widths = c(1.35,2))
+
   print(bp)
-  ggsave(paste(here('output/Alberto_results/'),'compare_boxplots',gsub("[[:punct:]]", "", c),'.pdf', sep=''))
+  if (params$save_files){
+  ggsave(paste(here('output/Alberto_reproduction/'),'compare_boxplots',gsub("[[:punct:]]", "", c),'.pdf', sep=''))
+      }
 }
 
 ```
 
 ## Heatmap
-What patterns in the parameters do we see?
+What patterns in the parameters do we find?
 
 ```{r}
-shape_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
-scale_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
-
-for (c in unique(all_parameters$phenotype_combo)){
-  shape_parameters <- left_join(x = shape_parameters, y= all_parameters %>% 
-                              select(c(tnumber, phenotype_combo, shape)) %>% 
-                              filter(phenotype_combo == c),
-                            by='tnumber') %>%
-                      select(-c(phenotype_combo))
-  names(shape_parameters)[names(shape_parameters) == 'shape'] = c
+transform_to_matrix <- function(all_parameters){
+  shape_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
+  scale_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
   
-  scale_parameters <- left_join(x = scale_parameters, y= all_parameters %>% 
-                              select(c(tnumber, phenotype_combo, scale)) %>% 
-                              filter(phenotype_combo == c),
-                            by='tnumber') %>%
-                      select(-c(phenotype_combo))
-  names(scale_parameters)[names(scale_parameters) == 'scale'] = c
+  for (c in unique(all_parameters$phenotype_combo)){
+    shape_parameters <- left_join(x = shape_parameters, y= all_parameters %>% 
+                                select(c(tnumber, phenotype_combo, shape)) %>% 
+                                filter(phenotype_combo == c),
+                              by='tnumber') %>%
+                        select(-c(phenotype_combo))
+    names(shape_parameters)[names(shape_parameters) == 'shape'] = c
+    
+    scale_parameters <- left_join(x = scale_parameters, y= all_parameters %>% 
+                                select(c(tnumber, phenotype_combo, scale)) %>% 
+                                filter(phenotype_combo == c),
+                              by='tnumber') %>%
+                        select(-c(phenotype_combo))
+    names(scale_parameters)[names(scale_parameters) == 'scale'] = c
+  }
+  
+  saveRDS(shape_parameters, here('scratch/shape_parameter_matrix.rds'))
+  saveRDS(scale_parameters, here('scratch/scale_parameter_matrix.rds'))
 }
 
-saveRDS(shape_parameters, here('scratch/shape_parameter_matrix.rds'))
-saveRDS(scale_parameters, here('scratch/scale_parameter_matrix.rds'))
 
-test <- read_rds(here('scratch/shape_parameter_matrix.rds'))
-
-
-generate_matrix<- function(df){
+generate_matrix<- function(df, subselection=NULL, NA_percentage=0){
   m <- as.data.frame(df)
   rownames(m) <- m$tnumber
   m <- m[,-c(1)]
-  #Only consider combinations with parameters for more than 20% of the samples
-  m <- m[, which(colMeans(!is.na(m)) > 0.2)]
-  m <- m %>% mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
+  # filtering: with percentages
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+  # Impute NANs before or after scaling?
+  # m <- m %>% mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
+  
+  if (!is.null(subselection)){
+    m <- m %>% select(all_of(subselection))
+  }
+  
   m <- scale(m)
+  m <- t(scale(t(m)))
+  m <- replace(m,is.na(m),0)
+  
+  m <- as.data.frame(m)
+
   return(m)
 }
 
-generate_hm <- function(df, n_clust, cluster_rows, cluster_columns,fontsize_rows, fontsize_columns, row_title, column_title){
-  m <- generate_matrix(df)
-  
-  ht <- Heatmap(as.matrix(m), name = 'shape parameters', column_title = column_title, row_title = row_title, 
+library(circlize)
+col_fun = colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
+
+generate_hm <- function(m, hm_name, n_clust, cluster_rows, cluster_columns,fontsize_rows, fontsize_columns, row_title, column_title){
+  ht <- Heatmap(as.matrix(m), name = paste(hm_name,'features'), column_title = column_title, row_title = row_title, 
                 row_names_gp = gpar(fontsize=fontsize_rows), column_names_gp = gpar(fontsize=fontsize_columns), 
-                cluster_rows = cluster_rows, cluster_columns =  cluster_columns, row_km = n_clust)
+                cluster_rows = cluster_rows, cluster_columns =  cluster_columns, row_km = n_clust,col=col_fun)
 
   return(ht)
 }
 
-shape_hm <- generate_hm(read_rds(here('scratch/shape_parameter_matrix.rds')),2, TRUE, TRUE, 2,5,'samples', 'combinations')
-scale_hm <- generate_hm(read_rds(here('scratch/scale_parameter_matrix.rds')),2, TRUE, TRUE, 2,5,'samples', 'combinations')
 
-save_pdf(shape_hm, here('output/shape_heatmap.pdf'), width=20, height=12)
-save_pdf(scale_hm, here('output/scale_heatmap.pdf'), width=20, height=12)
-
-subtype_proportions <- function(clusters){
+subtype_proportions <- function(clusters,label){
   clinical_data <- clinical_data %>% mutate(cluster = NA)
-for (i in 1:length(clusters)){
-  clinical_data <- clinical_data %>% mutate(cluster = ifelse(ImageNumber %in% clusters[[i]], as.character(i),cluster))
-}
-clinical_data <- clinical_data %>% drop_na(cluster)
+  for (i in 1:length(clusters)){
+    clinical_data <- clinical_data %>% mutate(cluster = ifelse(ImageNumber %in% clusters[[i]], as.character(names(clusters)[[i]]),cluster))
+  }
+  clinical_data <- clinical_data %>% drop_na(cluster)
 
-p <- ggplot() + geom_bar(data=clinical_data, aes(x= 'ALL', y= length(data),fill=PAM50),stat='identity',position='fill')  +
-  geom_bar(data=clinical_data,
-                    aes(x= cluster, y= length(data),fill=PAM50),stat='identity',position='fill') + 
-  xlab('cluster') + ylab('proportion') + theme_bw()
+  lengths <- tibble(cluster = names(clusters), length = c(sapply(clusters, length)))
 
-return(p)
+  p <- ggplot() +
+    geom_bar(data=clinical_data, aes(x= 'ALL', y= length(data),fill=get(label)),stat='identity',position='fill')  +
+    geom_text(data=lengths, aes(x='ALL',y=1,label = sum(lengths$length)), vjust = -1, size=3) +
+    geom_bar(data=clinical_data,aes(x= cluster, y= length(data),fill=get(label)),stat='identity',position='fill') +
+    geom_text(data=lengths, aes(x=cluster,y=1,label = length), vjust = -1, size=3) +
+    xlab('cluster') + ylab('proportion') + theme_bw() +ylim(0,1.2)
+  return(p)
 }
- 
 
 ```
-
-Cluster samples based on:
-1. densities
-2. close-far combinations
-3. parameters
 
 ```{r}
-cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
-                count(ImageNumber, meta_description) %>%
-                rename(tnumber=ImageNumber)
+shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')),NULL,0.5)
+scale_matrix <- generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')),NULL,0.5)
 
-cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>%
-                  mutate(n = coalesce(n, 0))
+shape_hm <- generate_hm(shape_matrix,'shape',20, TRUE, TRUE, 2,8,'samples', 'combinations')
+scale_hm <- generate_hm(scale_matrix,'scale',20, TRUE, TRUE, 2,8,'samples', 'combinations')
 
-density_matrix <- tibble(tnumber = unique(cell_occurences$tnumber))
+  if (params$save_files){
+save_pdf(shape_hm, here('output/Alberto_heatmaps/shape_heatmap.pdf'), width=20, height=12)
+save_pdf(scale_hm, here('output/Alberto_heatmaps/scale_heatmap.pdf'), width=20, height=12)
+  }
 
-for (c in unique(cell_occurences$meta_description)){
-  density_matrix <- left_join(x = density_matrix, y= cell_occurences %>% 
-                              filter(meta_description == c),
-                            by='tnumber') %>% select(-c(meta_description))
-  names(density_matrix)[names(density_matrix) == 'n'] = c
+ht = draw(shape_hm)
+cl = row_order(ht)
+print(subtype_proportions(cl, 'PAM50'))
+
+if (params$save_files){
+ggsave(paste(here('output/Method_comparison/'), 'subtypes_in_clusters_shape.pdf', sep=''))
+  }
+
+ht = draw(scale_hm)
+cl = row_order(ht)
+print(subtype_proportions(cl, 'PAM50'))
+
+if (params$save_files){
+ggsave(paste(here('output/Method_comparison/'), 'subtypes_in_clusters_scale.pdf', sep=''))
+  }
+```
+
+Show heatmap of cell type proportions.
+
+```{r}
+detach("package:Hmisc", unload=TRUE)
+library(data.table)
+
+cells <- getCells()
+
+# Compute proportions: all, tumour, stroma, vascular, interface
+mkProportionBy <- function(byvars, dt, suffix){
+
+	countsBy <- byvars
+	totalsBy <- setdiff(byvars, 'meta_description')
+	outVar <- paste0('proportion_',suffix)
+
+	dt[, counts := .N, by = byvars]
+	dt[, totals := .N, by = totalsBy]
+	dt[, eval(outVar) := (counts / totals)]
+	dt[, eval(c('counts', 'totals')) := NULL]
+	return(dt)
 }
 
-density_hm <- generate_hm(density_matrix, 5, cluster_rows = TRUE,cluster_columns = FALSE, 2,15,'samples', 'cell type')
+ptCellVars <- c('ImageNumber', 'meta_description') 
+mkProportionBy(byvars = ptCellVars,dt = cells, suffix = 'all')
 
-save_pdf(density_hm, here('output/density_heatmap.pdf'), width=20, height=12)
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial'),
+	dt = cells, suffix = 'isEpi')
 
-draw(density_hm)
-print(subtype_proportions(row_order(density_hm))+ ggtitle('clusters based on cell type densities'))
+cells[, is_vascular := (Parent_vessel != 0)]
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
+	dt = cells, suffix = 'isVesselByEpi')
 
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
+	dt = cells, suffix = 'isInterfaceByEpi')
+
+proportionVars <- grep('proportion_', names(cells), value = T)
+phenotypeVars <- grep('meta_|phenotype|colours', names(cells), value = T)
+indicatorVars <- grep('^is_', names(cells), value = T)
+indicatorVars <- setdiff(indicatorVars, c('is_normal', 'is_dcis'))
+
+toKeep <- c(ptCellVars, proportionVars, phenotypeVars, indicatorVars)
+proportionsOut <- cells[, .SD, .SDcols = toKeep]
+proportionsOut <- melt(proportionsOut,
+	id.vars = c('ImageNumber', phenotypeVars, indicatorVars),
+	measure.vars = proportionVars,
+	value = 'proportion',
+	variable = 'type'
+	)	
+proportionsOut[, type := gsub('proportion_', '', type)]
+proportionsOut[type == 'isEpi', 
+	type := ifelse(is_epithelial, 'tumour', 'stroma')]
+proportionsOut[type == 'isVesselByEpi', 
+	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
+proportionsOut[type == 'isInterfaceByEpi', 
+	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
+proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
+proportionsOut[, type := gsub('ByEpi', '', type)]
+proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
+	newSuffix := NULL]
+proportionsOut <- proportionsOut[, .SD[1], by = .(ImageNumber, meta_id, type)]
+proportionsOut[, type := gsub(' ', '', type)]
+
+proportionsOut[, check := sum(proportion), by = .(ImageNumber, type)]
+# Proportions are normalized to make the sum of a type per sample = 1
+stopifnot(all.equal(rep(1, nrow(proportionsOut)), proportionsOut[['check']]))
+proportionsOut[, check := NULL]
+
+saveRDS(proportionsOut, here('scratch/proportions_allsamples.rds'))
+cellPhenotypes <- readRDS(here('scratch/proportions_allsamples.rds'))
+
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+   y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+   by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+   by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
+cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+cellPhenotypes[is.na(proportion), proportion := 0]
+cellPhenotypes[, checkBothCompartments := sum(proportion), by = .(ImageNumber, type)]
+cellPhenotypes <- cellPhenotypes[checkBothCompartments > 0][, checkBothCompartments := NULL]
+cellPhenotypes <- dcast(cellPhenotypes, ImageNumber ~ meta_description, value.var = 'proportion')
+# cellPhenotypes <- na.omit(cellPhenotypes) # samples that contain both tumour and stromal cells
+
+saveRDS(cellPhenotypes,here('scratch/density_matrix.rds'))
 ```
+
 
 
 ```{r}
-# Parameters
-draw_shape_hm <- draw(shape_hm)
-clusters_shape <- row_order(draw_shape_hm)
-draw_scale_hm <- draw(scale_hm)
-clusters_scale <- row_order(draw_scale_hm)
+# Skip normalization over rows, because this is already done.
+generate_matrix_densities<- function(df, subselection=NULL, NA_percentage=0){
+  m <- as.data.frame(df)
+  rownames(m) <- m$ImageNumber
+  m <- m[,-c(1)]
+  # filtering: with percentages
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+  # Impute NANs before or after scaling?
+  # m <- m %>% mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
+  
+  if (!is.null(subselection)){
+    m <- m %>% select(all_of(subselection))
+  }
+  
+  m <- scale(m)
+  m <- t(scale(t(m)))
+  m <- replace(m,is.na(m),0)
+  
+  m <- as.data.frame(m)
 
+  return(m)
+}
+proportion_matrix <- generate_matrix_densities(cellPhenotypes)
 
-print(subtype_proportions(clusters_shape) + ggtitle('clusters based on shape parameter'))
-print(subtype_proportions(clusters_scale) + ggtitle('clusters based on scale parameter'))
+density_hm <- generate_hm(proportion_matrix, 'proportion',20,TRUE, TRUE, 5,15,'samples', 'cell type proportion')
+if (params$save_files){
+save_pdf(density_hm, here('output/Alberto_heatmaps/density_heatmap3.pdf'), width=20, height=15)
+}
+
+ht = draw(density_hm)
+cl = row_order(ht)
+print(subtype_proportions(cl,'Pam50 + Claudin-low subtype'))
+
+if (params$save_files){
+  ggsave(paste(here('output/Method_comparison/'), 'subtypes_in_clusters_density.pdf', sep=''))
+}
+
 ```
+
+HER2 positive samples are not clustered together. Take a closer look at these samples.
+
+```{r}
+HER2_samples <- clinical_data %>% filter(`HER2 Status` == 'Positive') %>% pull(ImageNumber)
+HER2_cellPHenotypes <- proportion_matrix %>% filter(rownames(proportion_matrix) %in% HER2_samples)
+
+density_hm <- generate_hm(HER2_cellPHenotypes, 'density',1,TRUE, TRUE, 5,15,'samples', 'cell type proportion')
+if (params$save_files){
+save_pdf(density_hm, here('output/Alberto_heatmaps/HER2positive_density_heatmap.pdf'), width=20, height=12)
+}
+
+```
+
+Not all HER2 positive patients contain HER2+ cells (in the METABRIC dataset at least).
+
+Take a look at the PAM50 patient groups.
+
+```{r}
+subtypes <- unique(clinical_data$`Pam50 + Claudin-low subtype`)
+for (s in subtypes){
+  if (is.na(s)){
+      samples_cellPHenotypes <- proportion_matrix %>% filter(rownames(proportion_matrix) %in% (clinical_data %>% filter(is.na(`Pam50 + Claudin-low subtype`)) %>% pull(ImageNumber)))
+  
+  }else{
+  samples_cellPHenotypes <- proportion_matrix %>% filter(rownames(proportion_matrix) %in% (clinical_data %>% filter(`Pam50 + Claudin-low subtype` == s) %>% pull(ImageNumber)))
+  }
+  
+  subtype_hm <- generate_hm(samples_cellPHenotypes, 'density',1,TRUE, TRUE, 5,8,paste(s, 'samples'), 'cell type proportion')
+  save_pdf(subtype_hm, paste(here('output/Alberto_heatmaps/'),s,'_density_heatmap.pdf',sep=''), width=20, height=12)
+  
+}
+
+```
+
+```{r}
+subtypes <- unique(clinical_data$`IntClust`)
+for (s in subtypes){
+  if (is.na(s)){
+      samples_cellPHenotypes <- proportion_matrix %>% filter(rownames(proportion_matrix) %in% (clinical_data %>% filter(is.na(`IntClust`)) %>% pull(ImageNumber)))
+  
+  }else{
+  samples_cellPHenotypes <- proportion_matrix %>% filter(rownames(proportion_matrix) %in% (clinical_data %>% filter(`IntClust` == s) %>% pull(ImageNumber)))
+  }
+  
+  subtype_hm <- generate_hm(samples_cellPHenotypes, 'density',1,TRUE, TRUE, 5,8,paste(s, 'samples'), 'cell type proportion')
+  save_pdf(subtype_hm, paste(here('output/Alberto_heatmaps/'),sub("+", "plus", s, fixed = T),'_density_heatmap.pdf',sep=''), width=20, height=12)
+  
+}
+```
+
 
 ## UMAP
 Plot the parameters as UMAP to see if there are clusters of the same cancer subtype.
@@ -581,12 +1052,11 @@ Plot the parameters as UMAP to see if there are clusters of the same cancer subt
 ```{r}
 library(umap)
 
-shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')))
-scale_matrix <- generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')))
 
-labels <- merge(as_tibble(rownames(shape_matrix)), clinical_data %>% select(ImageNumber, PAM50), by.x='value', by.y='ImageNumber', all.x=T) %>% rename(tnumber = value) %>% mutate(tnumber = as.numeric(tnumber))
+colnames(generate_labels(shape_matrix))
 
-generate_UMAP <- function(matrix, labels, title){
+generate_UMAP <- function(matrix, title){
+  labels =generate_labels(matrix)
   umap <- umap(matrix)
   umap <- umap$layout %>%
   as.data.frame()%>%
@@ -598,90 +1068,375 @@ generate_UMAP <- function(matrix, labels, title){
   return(umap %>%
   ggplot(aes(x = UMAP1, 
              y = UMAP2, 
-             color = PAM50))+
+             color = ER_Status))+
   geom_point()+ theme_bw() +
   labs(x = "UMAP1",
        y = "UMAP2",
       subtitle = title))
 }
 
-print(generate_UMAP(shape_matrix, labels, 'UMAP plot of shape parameters'))
-print(generate_UMAP(scale_matrix, labels, 'UMAP plot of scale parameters'))
 
+print(generate_UMAP(shape_matrix,'UMAP plot of shape parameters'))
+print(generate_UMAP(scale_matrix,'UMAP plot of scale parameters'))
+```
+
+
+## PCA
+
+PCA of samples based on parameter features. We only consider features which are estimated in more than 50% of the samples. 
+
+```{r}
+library(factoextra)
+library(corrplot)
+
+generate_labels <- function(matrix){
+  labels <- merge(as_tibble(rownames(matrix)), clinical_data, by.x='value', by.y='ImageNumber', all.x=T) %>% 
+    rename(tnumber = value) %>% mutate(tnumber = as.numeric(tnumber)) %>% rename(PAM50 = "Pam50 + Claudin-low subtype")
+  labels <- labels %>%
+    mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
+    mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
+    mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
+    mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+    mutate(claudin = ifelse(PAM50=='claudin-low', 'Claudin-low', 'Other')) %>%
+    mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
+
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+ return(labels) 
+}
+
+plot_pca <- function(matrix, label){
+  labels = generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'tnumber'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='tnumber', all.x=T)
+
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  print(fviz_eig(res.pca))
+  print(fviz_pca_ind(res.pca,
+               col.ind = "cos2", # Color by the quality of representation
+               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+               repel = TRUE     # Avoid text overlapping
+               ))
+
+  p1 <- (fviz_pca_ind(res.pca, label="none", habillage=matrix_withlabels %>% pull(!!label)))
+  print(p1)
+
+  p2 <- (fviz_pca_var(res.pca,
+               col.var = "contrib", # Color by contributions to the PC
+               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+               repel = TRUE     # Avoid text overlapping
+               ))
+  print(p2)
+
+  return(plot_grid(p1,p2, ncol = 2))
+  
+}
+
+shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')),NULL,0.5)
+scale_matrix <- generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')),NULL,0.5)
+
+pca_shape <- plot_pca(shape_matrix, "PAM50")
+ggsave(here('output/Alberto_PCA/pca_shape.pdf'),width=20, height=10)
+pca_scale <- plot_pca(scale_matrix, 'PAM50')
+ggsave(here('output/Alberto_PCA/pca_scale.pdf'),width=20, height=10)
+
+```
+
+Combination of rare cell type contribute most to the variation. Is the spatial information really useful or is it just the presence of cell types that separates the samples.
+
+```{r}
+proportion_matrix <- generate_matrix_densities(cellPhenotypes)
+
+pca_density <- plot_pca(proportion_matrix, 'PAM50')
+
+```
+
+
+```{r}
+# PCA of shape/scale parameters + density
+shape_density_matrix <- merge(shape_matrix, proportion_matrix ,by='row.names')
+rownames(shape_density_matrix) <- shape_density_matrix[,'Row.names']
+shape_density_matrix <- shape_density_matrix %>% select(-c('Row.names'))
+
+scale_density_matrix <- merge(scale_matrix,  proportion_matrix ,by='row.names')
+rownames(scale_density_matrix) <- scale_density_matrix[,'Row.names']
+scale_density_matrix <- scale_density_matrix %>% select(-c('Row.names'))
+
+shape_scale_density_matrix <- merge(shape_density_matrix, scale_matrix, by='row.names')
+rownames(shape_scale_density_matrix) <- shape_scale_density_matrix[,'Row.names']
+shape_scale_density_matrix <- shape_scale_density_matrix %>% select(-c('Row.names'))
+
+pca_shape_density <- plot_pca(shape_density_matrix, 'PAM50')
+pca_scale_density <- plot_pca(scale_density_matrix, 'PAM50')
+# PCA of shape + scale parameters + density
+pca_shape_scale_density <- plot_pca(shape_scale_density_matrix, 'PAM50')
 
 
 ```
+
+There is no clear separation of cell types. Consider combinations that are dominant in a specific subtypes.
+
+```{r}
+plot_pca_labels <- function(matrix, label, title){
+  labels = generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'tnumber'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='tnumber', all.x=T)
+
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  p1 <- fviz_pca_ind(res.pca, label="none", habillage=matrix_withlabels %>% pull(!!label),addEllipses=TRUE) +
+  labs(title = title)
+
+  p2 <- fviz_pca_var(res.pca,
+               col.var = "contrib", # Color by contributions to the PC
+               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+               repel = TRUE     # Avoid text overlapping
+               ) +labs(title = title)
+
+  return(plot_grid(p1,p2, ncol = 2))
+  
+}
+
+combination_occurences <- get_combination_occurences()
+
+# Filter values should be examined further
+dominant_estimations <- unique(combination_occurences %>% filter(n  > (expected_n*3) )) %>% filter(n > 5)
+# dominant_estimations <- unique(combination_occurences %>% filter(n_total > (794*0.5)) %>% filter(n  > (expected_n*2) | n  < (expected_n*(1/2))))
+
+
+match_type <- tibble(data = c('Her2', 'LumA', 'LumB', 'claudin-low', 'Basal', 'Normal'), label = c('HER', 'LuminalA', 'LuminalB', 'claudin','Bas', 'Norm'))
+
+for (type in unique(dominant_estimations$PAM50)){
+  type_specific <- unique(dominant_estimations %>% filter(PAM50 == type) %>% pull(phenotype_combo))
+  type_specific_cells <- paste(unique(unique(dominant_estimations %>% filter(PAM50 == type) %>% pull(phenotype_to)),unique(dominant_estimations %>% filter(PAM50 == type) %>% pull(phenotype_to))), 'CPh',sep = '_')
+  
+  shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')),type_specific, 0)
+  scale_matrix <-  generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')),type_specific, 0)
+  density_matrix <- generate_matrix_densities(read_rds(here('scratch/density_matrix.rds')),type_specific_cells, 0)
+  
+  p_shape <- plot_pca_labels(shape_matrix, match_type %>% filter(data==type) %>% pull(label), paste(type, 'shape parameter features'))
+  p_scale <- plot_pca_labels(scale_matrix,  match_type %>% filter(data==type) %>% pull(label), paste(type, 'scale parameter features'))
+  p_density <- plot_pca_labels(density_matrix,  match_type %>% filter(data==type) %>% pull(label), paste(type, 'density features'))
+
+  density_matrix <- density_matrix %>% mutate(tnumber = rownames(density_matrix))
+  shape_matrix <- shape_matrix %>% mutate(tnumber = rownames(shape_matrix))
+  scale_matrix <- scale_matrix %>% mutate(tnumber = rownames(scale_matrix))
+  shape_density_matrix <- merge(shape_matrix, density_matrix ,by='tnumber', all.y=T)
+  scale_density_matrix <- merge(scale_matrix, density_matrix ,by='tnumber',all.y=T)
+
+  rownames(shape_density_matrix) <- shape_density_matrix$tnumber
+  shape_density_matrix <- shape_density_matrix %>% select(-c(tnumber))
+  rownames(scale_density_matrix) <- scale_density_matrix$tnumber
+  scale_density_matrix <- scale_density_matrix %>% select(-c(tnumber))
+  
+  shape_density_matrix <- replace(shape_density_matrix,is.na(shape_density_matrix),0)
+  scale_density_matrix <- replace(scale_density_matrix,is.na(scale_density_matrix),0)
+
+  p_shape_density <- plot_pca_labels(shape_density_matrix,  match_type %>% filter(data==type) %>% pull(label), paste(type, 'density and shape features'))
+  p_scale_density <- plot_pca_labels(scale_density_matrix,  match_type %>% filter(data==type) %>% pull(label), paste(type, 'density and scale features'))
+
+  ggsave(paste(here('output/Alberto_PCA/pca'), type, '.pdf', sep=''), 
+         plot_grid(p_shape, p_scale, p_density, p_shape_density, p_scale_density, ncol=1), height=20, width=10)
+}
+
+```
+
+Try this for the IntClusts.
+
+```{r}
+parameters_with_subtypes <- merge(all_parameters, clinical_data %>% select(c("ImageNumber", "Pam50 + Claudin-low subtype", "HER2 Status", "ER Status", "PR Status", "IntClust")), by.x='tnumber', by.y='ImageNumber')
+
+combination_occurences <- (parameters_with_subtypes %>% group_by(`IntClust`, phenotype_combo) %>% summarise(n = n())) %>% separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+subtype_count <- clinical_data %>% group_by(IntClust) %>% summarise(n_proportion = n()/794)
+
+combination_occurences <- merge(merge(combination_occurences, combination_occurences %>% group_by(phenotype_combo) %>% summarise(n_total = sum(n)), by='phenotype_combo'), subtype_count, by='IntClust') %>% mutate(expected_n = (n_proportion) * n_total)
+
+# Filter values are up to optimization
+# dominant_estimations <- unique(combination_occurences %>% filter(n  > (expected_n*4) )) %>% filter(n_total > 5)
+dominant_estimations <- unique(combination_occurences %>% filter(n_total > (794*0.5)) %>% filter(n  > (expected_n*2) | n  < (expected_n*(1/2))))
+
+for (type in unique(dominant_estimations$IntClust)){
+  type_specific <- unique(dominant_estimations %>% filter(IntClust == type) %>% pull(phenotype_combo))
+  type_specific_cells <- paste(unique(unique(dominant_estimations %>% filter(IntClust == type) %>% pull(phenotype_to)),unique(dominant_estimations %>% filter(IntClust == type) %>% pull(phenotype_to))), 'CPh',sep = '_')
+  
+  shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')),type_specific, 0)
+  scale_matrix <-  generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')),type_specific, 0)
+  density_matrix <- generate_matrix_densities(read_rds(here('scratch/density_matrix.rds')),type_specific_cells, 0)
+  
+  p_shape <- plot_pca_labels(shape_matrix, 'IntClust', paste(type, 'shape parameter features'))
+  p_scale <- plot_pca_labels(scale_matrix,  'IntClust', paste(type, 'scale parameter features'))
+  p_density <- plot_pca_labels(density_matrix, 'IntClust', paste(type, 'density features'))
+
+  density_matrix <- density_matrix %>% mutate(tnumber = rownames(density_matrix))
+  shape_matrix <- shape_matrix %>% mutate(tnumber = rownames(shape_matrix))
+  scale_matrix <- scale_matrix %>% mutate(tnumber = rownames(scale_matrix))
+  shape_density_matrix <- merge(shape_matrix, density_matrix ,by='tnumber', all.y=T)
+  scale_density_matrix <- merge(scale_matrix, density_matrix ,by='tnumber',all.y=T)
+
+  rownames(shape_density_matrix) <- shape_density_matrix$tnumber
+  shape_density_matrix <- shape_density_matrix %>% select(-c(tnumber))
+  rownames(scale_density_matrix) <- scale_density_matrix$tnumber
+  scale_density_matrix <- scale_density_matrix %>% select(-c(tnumber))
+  
+  shape_density_matrix <- replace(shape_density_matrix,is.na(shape_density_matrix),0)
+  scale_density_matrix <- replace(scale_density_matrix,is.na(scale_density_matrix),0)
+
+  p_shape_density <- plot_pca_labels(shape_density_matrix,  'IntClust', paste(type, 'density and shape features'))
+  p_scale_density <- plot_pca_labels(scale_density_matrix,  'IntClust', paste(type, 'density and scale features'))
+
+  ggsave(paste(here('output/Alberto_PCA/pca'), type, '.pdf', sep=''), 
+         plot_grid(p_shape, p_scale, p_density, p_shape_density, p_scale_density, ncol=1), height=20, width=10)
+}
+```
+
+## Next steps?
+
+1. Clustering method, analyse clusters on clincial features, densities and distances
+2. Hazard ratio association comparison (figure 6 Danenberg)
 
 
 ## scratch
 
+## Clustering
+Look at groups of combinations and samples that are alike (clusters). Identify possible associations with clinical features.
+
+
+```{r}
+# subtype_proportions <- function(clusters){
+#   clinical_data <- clinical_data %>% mutate(cluster = NA)
+#   for (i in 1:length(clusters)){
+#     clinical_data <- clinical_data %>% mutate(cluster = ifelse(ImageNumber %in% clusters[[i]], as.character(names(clusters)[[i]]),cluster))
+#   }
+#   clinical_data <- clinical_data %>% drop_na(cluster)
+#   
+#   lengths <- tibble(cluster = names(clusters), length = c(sapply(clusters, length)))
+#   
+#   p <- ggplot() + 
+#     geom_bar(data=clinical_data, aes(x= 'ALL', y= length(data),fill=PAM50),stat='identity',position='fill')  +
+#     geom_text(data=lengths, aes(x='ALL',y=1,label = sum(lengths$length)), vjust = -1, size=3) +  
+#     geom_bar(data=clinical_data,aes(x= cluster, y= length(data),fill=PAM50),stat='identity',position='fill') +
+#     geom_text(data=lengths, aes(x=cluster,y=1,label = length), vjust = -1, size=3) +
+#     xlab('cluster') + ylab('proportion') + theme_bw() +ylim(0,1.2)
+#   return(p)
+# }
+# 
+# set.seed(123)
+# 
+# shape_matrix <- generate_matrix(read_rds(here('scratch/shape_parameter_matrix.rds')),NULL,0.5)
+# scale_matrix <- generate_matrix(read_rds(here('scratch/scale_parameter_matrix.rds')),NULL,0.5)
+# 
+# subtype_dendogram <- function(matrix,min_split, max_split){
+#   dist_mat <- dist(matrix, method = 'euclidean')
+#   hcluster <- hclust(dist_mat, method = 'ward.D')
+#   plot(hcluster,labels=F)
+#   
+#   clusters <- tibble(tnumber = rownames(matrix))
+#   for (s in min_split:max_split){
+#     split <- cutree(hcluster,k=s)
+#     split_t <- tibble(tnumber = names(split), cluster = split)
+#     clusters <- merge(clusters, split_t, by= 'tnumber', all.x=T)
+#     clusters <- clusters %>% rename(!!paste('cluster_', s, sep='') := cluster)
+#   }
+#   return(clusters)
+# }
+# 
+# cl <- subtype_dendogram(shape_matrix, 2,20)
+# 
+# matrix_withlabels <- cbind.data.frame(shape_matrix, rownames(shape_matrix))
+# colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'tnumber'
+# matrix_withlabels <- merge(matrix_withlabels, cl %>% select(c(tnumber,cluster_19)), by='tnumber', all.x=T)
+# 
+# res.pca <- prcomp(shape_matrix, scale = FALSE)
+# print(fviz_pca_ind(res.pca, label="none", habillage=matrix_withlabels$cluster_19))
+# 
+# check_subtype_proportions <- function(clusters){
+#   subtypes <- merge(clinical_data, cl, by.x='ImageNumber', by.y='tnumber')
+#   
+#   for (name in tail(names(cl),-1)){
+#     sel <- subtypes %>% select(c(ImageNumber, PAM50, !!name))
+#     lengths <- sel %>% count(!!name)
+#     print(ggplot() + 
+#         geom_bar(data=sel,aes(x= sel[,ncol(sel)], y= length(data),fill=PAM50),stat='identity',position='fill') +
+#         # geom_text(data=lengths, aes(x=!!name,y=1,label = n), vjust = -1, size=3) +
+#         xlab('cluster') + ylab('proportion') + theme_bw() +ylim(0,1.2))
+#   }
+# 
+# }
+# 
+# check_subtype_proportions(cl)
+
+```
+
+
+
 ```{r}
 #Generate a correlation matrix
 
-parameter_matrix <- tibble(tnumber = unique(all_parameters$tnumber))
-
-for (c in unique(all_parameters$phenotype_combo)){
-  parameter_matrix <- left_join(x = parameter_matrix, y= all_parameters %>% 
-                              select(c(tnumber, phenotype_combo, shape)) %>% 
-                              filter(phenotype_combo == c),
-                            by='tnumber') %>%
-                      select(-c(phenotype_combo))
-  names(parameter_matrix)[names(parameter_matrix) == 'shape'] = c
-}
-
-parameter_matrix <- parameter_matrix %>% select(-c(tnumber))
-
-correlation_matrix <- Hmisc::rcorr(as.matrix(parameter_matrix), type="pearson")
-
-flattenCorrMatrix <- function(cormat, pmat, nmat) {
-  ut <- upper.tri(cormat)
-  data.frame(
-    row = rownames(cormat)[row(cormat)[ut]],
-    column = rownames(cormat)[col(cormat)[ut]],
-    cor  =(cormat)[ut],
-    p = pmat[ut],
-    n = nmat[ut]
-    )
-}
-
-flattened_correlation_matrix <- flattenCorrMatrix(correlation_matrix$r, correlation_matrix$P, correlation_matrix$n) %>% drop_na()  %>%
-  filter(n > 200) %>%
-  mutate(sig_p = ifelse(p < .05, T, F), p_if_sig = ifelse(p <.05, p, NA), r_if_sig = ifelse(p <.05, cor, NA))
-
-flattened_correlation_matrix %>% 
- ggplot(aes(row, column, fill=cor, label=round(r_if_sig,2))) +
- geom_tile() + 
- labs(x = NULL, y = NULL, fill = "Pearson's\nCorrelation")+ 
-  theme(axis.text = element_text(size = 1))  + 
- scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
- scale_x_discrete(expand=c(0,0)) + 
- scale_y_discrete(expand=c(0,0))
+# parameter_matrix <- tibble(tnumber = unique(all_parameters$tnumber))
+# 
+# for (c in unique(all_parameters$phenotype_combo)){
+#   parameter_matrix <- left_join(x = parameter_matrix, y= all_parameters %>% 
+#                               select(c(tnumber, phenotype_combo, shape)) %>% 
+#                               filter(phenotype_combo == c),
+#                             by='tnumber') %>%
+#                       select(-c(phenotype_combo))
+#   names(parameter_matrix)[names(parameter_matrix) == 'shape'] = c
+# }
+# 
+# parameter_matrix <- parameter_matrix %>% select(-c(tnumber))
+# 
+# correlation_matrix <- Hmisc::rcorr(as.matrix(parameter_matrix), type="pearson")
+# 
+# flattenCorrMatrix <- function(cormat, pmat, nmat) {
+#   ut <- upper.tri(cormat)
+#   data.frame(
+#     row = rownames(cormat)[row(cormat)[ut]],
+#     column = rownames(cormat)[col(cormat)[ut]],
+#     cor  =(cormat)[ut],
+#     p = pmat[ut],
+#     n = nmat[ut]
+#     )
+# }
+# 
+# flattened_correlation_matrix <- flattenCorrMatrix(correlation_matrix$r, correlation_matrix$P, correlation_matrix$n) %>% drop_na()  %>%
+#   filter(n > 200) %>%
+#   mutate(sig_p = ifelse(p < .05, T, F), p_if_sig = ifelse(p <.05, p, NA), r_if_sig = ifelse(p <.05, cor, NA))
+# 
+# flattened_correlation_matrix %>% 
+#  ggplot(aes(row, column, fill=cor, label=round(r_if_sig,2))) +
+#  geom_tile() + 
+#  labs(x = NULL, y = NULL, fill = "Pearson's\nCorrelation")+ 
+#   theme(axis.text = element_text(size = 1))  + 
+#  scale_fill_gradient2(mid="#FBFEF9",low="#0C6291",high="#A63446", limits=c(-1,1)) +
+#  scale_x_discrete(expand=c(0,0)) + 
+#  scale_y_discrete(expand=c(0,0))
   
 ```
 
 
 ```{r}
-significant_correlations <- flattened_correlation_matrix %>% 
-  filter(sig_p == TRUE) %>%
-  filter(p_if_sig > 0) %>%
-  arrange(p_if_sig) 
-
-significant_correlations %>% head()
-
-
-for (c in 1:5){
-point <- all_parameters %>%
-    filter(phenotype_combo == significant_correlations[c,"row"] | phenotype_combo == significant_correlations[c,"column"]) %>%
-    ggplot(aes(x=shape, y=scale, color=phenotype_combo)) +
-    geom_point(alpha=0.4, size=3) +
-    ylim(10,300) + xlim(0,6) +
-    theme_bw() + scale_y_log10() +
-    xlab('Shape') + ylab('Scale') +
-    theme(legend.position='right') + ggtitle(paste('correlated with p-value: ', signif(significant_correlations[c,"p_if_sig"],digits=3))) + 
-  guides(colour = guide_legend(override.aes = list(size=10)))
-  
-  print(point)
-}
+# significant_correlations <- flattened_correlation_matrix %>% 
+#   filter(sig_p == TRUE) %>%
+#   filter(p_if_sig > 0) %>%
+#   arrange(p_if_sig) 
+# 
+# significant_correlations %>% head()
+# 
+# 
+# for (c in 1:5){
+# point <- all_parameters %>%
+#     filter(phenotype_combo == significant_correlations[c,"row"] | phenotype_combo == significant_correlations[c,"column"]) %>%
+#     ggplot(aes(x=shape, y=scale, color=phenotype_combo)) +
+#     geom_point(alpha=0.4, size=3) +
+#     ylim(10,300) + xlim(0,6) +
+#     theme_bw() + scale_y_log10() +
+#     xlab('Shape') + ylab('Scale') +
+#     theme(legend.position='right') + ggtitle(paste('correlated with p-value: ', signif(significant_correlations[c,"p_if_sig"],digits=3))) + 
+#   guides(colour = guide_legend(override.aes = list(size=10)))
+#   
+#   print(point)
+# }
 
 ```
 

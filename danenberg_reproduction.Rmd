@@ -408,21 +408,21 @@ false_discovery$predict_id <- as.character(issues$VarDiff_TMEStructure$COMPARE)
 false_discovery$TMEStructure <- as.character(false_discovery$TMEStructure)
 false_discovery <- false_discovery %>% rename("true_id" = "TMEStructure")
 
-false_discovery[,23:24]
-
-structures <- getStructures()
-
-cell_labels <- data.frame(as.character(structures$TME$dat$Structure), as.character(structures$TME$dat$Label))
-setnames(cell_labels, c("id", "structure"))
-
-
-false_discovery <- left_join(false_discovery, cell_labels, by=c("true_id" = "id"))
-false_discovery <- false_discovery %>% rename("true_structure" = "structure")
-false_discovery <- left_join(false_discovery, cell_labels, by=c("predict_id" = "id"))
-false_discovery <- false_discovery %>% rename("predict_structure" = "structure")
-
-library("caret")
-confusionMatrix(as.factor(false_discovery$true_structure), as.factor(false_discovery$predict_structure))
+# false_discovery[,23:24]
+# 
+# structures <- getStructures()
+# 
+# cell_labels <- data.frame(as.character(structures$TME$dat$Structure), as.character(structures$TME$dat$Label))
+# setnames(cell_labels, c("id", "structure"))
+# 
+# 
+# false_discovery <- left_join(false_discovery, cell_labels, by=c("true_id" = "id"))
+# false_discovery <- false_discovery %>% rename("true_structure" = "structure")
+# false_discovery <- left_join(false_discovery, cell_labels, by=c("predict_id" = "id"))
+# false_discovery <- false_discovery %>% rename("predict_structure" = "structure")
+# 
+# library("caret")
+# confusionMatrix(as.factor(false_discovery$true_structure), as.factor(false_discovery$predict_structure))
 ```
 The resulting communities are aggregated per patient
 
@@ -454,6 +454,9 @@ write_fst(ptLevel, outfile, compress = 100)
 
 #Clean intermediate results
 rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+
+write_rds(NetworkProperties, here('scratch/NetworkProperties.rds'))
+
 
 ```
 
