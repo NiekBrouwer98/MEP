@@ -1,0 +1,198 @@
+---
+title: "predictions_2"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(parallel)
+library(here)
+library(fst)
+library(assertthat)
+library(RColorBrewer)
+library(cowplot)
+library(ggpubr)
+library(gtools)
+source(here("UtilityFunctions.R"))
+
+outDir <- here('scratch')
+cellDat <- getCells()
+clinical <- getClinical()
+cellDat <- merge(x = cellDat, y = clinical, by = 'metabric_id') 
+```
+
+```{r}
+cellDat[, shannonDiversity := vegan::diversity(print_order), by = .(is_epithelial, metabric_id, is_normal)]
+cellDat <- cellDat[is.na(is_dcis)|is_dcis == 0L]
+cellDat[, cellCount := .N, by = .(metabric_id, is_epithelial, is_normal)]
+shannons <- cellDat[, .SD[1], by = .(metabric_id, is_normal, is_epithelial)]
+shannons <- shannons[, .(metabric_id, is_normal, is_epithelial, shannonDiversity, cellCount, IntClust, PAM50)]
+shannons[, hasEpithelial := .N, by = .(metabric_id)]
+shannons <- shannons[hasEpithelial > 1L]
+
+```
+
+```{r}
+mkLMresultsTable <- function(predictorType){
+	if(!grepl('normal', predictorType)) toLR <- copy(shannons[is_normal == 0L])
+	else toLR <- copy(shannons)
+	toKeep <- c('metabric_id', 'shannonDiversity', 'is_epithelial', predictorType, 'cellCount')
+	toLR <- toLR[, .SD, .SDcols = toKeep]
+	toLR <- toLR[!is.na(get(predictorType))]
+
+	fixNames <- function(levels){
+		levels <- gsub(' ', '', levels)
+		levels <- gsub('\\-', 'neg', levels)
+		levels <- gsub('\\+', 'pos', levels)
+		return(levels)
+	}
+	
+	toLR[, eval(predictorType) := fixNames(get(predictorType))]
+	levels <- toLR[, unique(get(predictorType))]
+	if(!grepl('normal', predictorType)) for(l in levels) toLR[, eval(l) := ifelse(get(predictorType) == l, 1L, 0L)]
+
+	grabEstimates <- function(modelout){
+		model_tidy <- adt(broom::tidy(modelout)) 
+		estimate <- model_tidy[2, .(estimate, p.value, std.error)]
+		CI <- adt(broom::confint_tidy(modelout)[2,])
+		samplesize <- adt(broom::glance(modelout))
+		samplesize <- samplesize$df.residual + nrow(model_tidy)
+		modelout <- cbind(estimate, CI)
+		modelout[, samplesize := samplesize]
+		return(modelout)
+	}
+
+	doLM <- function(predictor) {
+		out <- toLR[, grabEstimates(lm(shannonDiversity ~ get(predictor), 
+			data = .SD, weights = .SD[, cellCount])), by = is_epithelial]
+		nTumours <- toLR[get(predictor) == 1L, .N]
+		out[, predictor := predictor]
+		out[, NofTumours := nTumours]		
+		return(out)
+	}
+	if(!grepl('normal', predictorType))	results <- rbindlist(lapply(levels, doLM))
+	else results <- doLM(predictorType)	
+	results[, TypeOfPredictor := predictorType]
+	return(results)
+}
+
+LMResults <- lapply(c('is_normal', 'PAM50', 'IntClust'), mkLMresultsTable)
+LMResults <- rbindlist(LMResults)
+
+LMResults
+
+```
+```{r}
+subtypeCols <- getSubtypeCols()
+LMResults[predictor == 'is_normal', predictor := 'Normal v Tumour']
+
+renameP50 <- names(subtypeCols$PAM50)
+names(renameP50) <- c('LuminalA', 'LuminalB', 'HER2', 'Basal', 'Normalneglike')
+LMResults[TypeOfPredictor == 'PAM50', predictor := renameP50[predictor]]
+yaxisMap <- rev(seq_len(length(renameP50)) + 1)
+names(yaxisMap) <- renameP50
+LMResults[TypeOfPredictor == 'PAM50', yaxis := yaxisMap[predictor]]
+LMResults[, predictor := gsub('IntClust', 'IntClust ', predictor)]
+LMResults[, predictor := gsub('pos', '\\+', predictor)]
+LMResults[, predictor := gsub('neg', '\\-', predictor)]
+renameIC <- rev(seq_len(length(subtypeCols$IntClust)) + 6)
+names(renameIC) <- names(subtypeCols$IntClust)
+LMResults[TypeOfPredictor == 'IntClust', yaxis := renameIC[predictor]]
+colMap <- unlist(subtypeCols)
+names(colMap) <- gsub('.*\\.', '', names(colMap))
+LMResults[, colours := colMap[predictor]]
+LMResults[is.na(colours), colours := '#2ca25f']
+LMResults[is.na(yaxis), yaxis := 1L]
+LMResults[, TypeOfPredictor := gsub('is_normal', ' ', TypeOfPredictor)]
+facetVar <- c(' ' = 1, 'PAM50' = 2, 'IntClust' = 3)
+LMResults[, facetBy := factor(facetVar[TypeOfPredictor], 
+	levels = facetVar, labels = names(facetVar), ordered = TRUE)]
+LMResults <- LMResults[order(yaxis)]
+LMResults[, yaxis := factor(yaxis, 
+	levels = sortunique(yaxis), labels = unique(predictor), ordered = TRUE)]
+LMResults[, epithelialFacet := ifelse(is_epithelial == TRUE, 0L, 1L)]
+LMResults[, epithelialFacet := factor(epithelialFacet, 
+	levels = c(0,1), labels = c('Epithelial', 'TME'), ordered = TRUE)]
+LMResults[, markerSize := 1 / (`conf.high` - `conf.low`)]
+LMResults[, adj_p := p.adjust(`p.value`, method = 'BH'), by = .(is_epithelial, facetBy)]
+LMResults[, sigFill := ifelse(adj_p < 0.05, '#636363', 'lightgrey')]
+LMResults[, sigCol := ifelse(adj_p < 0.05, colours, 'lightgrey')]
+LMResults[adj_p < 0.05]
+
+getProportionEpithelial <- function(){
+	dat <- cellDat[, .(metabric_id, IntClust, PAM50, is_normal, is_epithelial)]
+	dat <- melt(dat, id.vars = c('metabric_id', 'is_epithelial'))
+	dat[, totalCells := .N, by = value]
+	dat[, proportionEpithelial := .N, by = .(value, is_epithelial)]
+	dat[, proportionEpithelial := proportionEpithelial / totalCells]
+	dat <- dat[(is_epithelial), .SD[1], by = .(value, is_epithelial)][!is.na(value)]
+	return(dat)
+}
+proportionEpithelial <- getProportionEpithelial()
+proportionEpithelial[, yaxis := c(yaxisMap, renameIC)[value]]
+proportionEpithelial <- proportionEpithelial[value != 0][is.na(yaxis), yaxis := 1][order(yaxis)]
+proportionEpithelial[value == 1, value := 'Normal v Tumour']
+proportionEpithelial[, yaxis := factor(yaxis, 
+	levels = yaxis, labels = value, ordered = TRUE)]
+proportionEpithelial[variable == 'is_normal', facetBy := 1]
+proportionEpithelial[variable == 'PAM50', facetBy := 2]
+proportionEpithelial[variable == 'IntClust', facetBy := 3]
+proportionEpithelial[, facetCol := '1L']
+proportionEpithelial <- merge(x = proportionEpithelial, 
+	y = LMResults[(is_epithelial), .(yaxis, NofTumours)], by = 'yaxis') 
+
+colourBarDat <- LMResults[(is_epithelial), .(yaxis, colours)]
+proportionEpithelial <- merge(x = proportionEpithelial, y = colourBarDat, 
+	by = 'yaxis') 
+
+propBar <- ggplot(data = proportionEpithelial) +
+	geom_col(aes(y = 1L, x = yaxis), fill = 'lightgrey') +
+	geom_col(aes(y = proportionEpithelial, x = yaxis), fill = '#636363') +
+	geom_text(aes(y = 1, x = yaxis, label = NofTumours), 
+		colour = 'black', hjust = 1) +
+	geom_segment(aes(y = 1.01, yend = 1.05, x = yaxis, xend = yaxis, colour = colours),
+		size = 4) +
+	scale_colour_identity() +
+	coord_flip() + 
+	theme_prj() +
+	facet_grid(rows = vars(facetBy), cols = vars(facetCol), space = 'free_y', scale = 'free',
+		labeller = label_parsed) +
+	theme(strip.text = element_blank(),
+		plot.margin = unit(c(0,0,0,0), 'cm')) +
+	scale_y_continuous(breaks = c(0,1), labels = c('0', '1'), expand = c(0,0)) +
+	labs(x = '', y = 'Epithelial %') 
+
+p <- ggplot(data = LMResults) +
+	geom_vline(xintercept = 0L, colour = 'grey') +
+	geom_segment(aes(x = `conf.low`, xend = `conf.high`,
+		y = yaxis, yend = yaxis, colour = sigFill), lineend = 'round') +
+	geom_point(aes(x = estimate, y = yaxis, size = markerSize, colour = sigFill, fill = sigCol),
+		pch = 21) +
+	scale_colour_identity() +
+	scale_fill_identity() +
+	facet_grid(rows = vars(facetBy), cols = vars(epithelialFacet), 
+		space = 'free_y', scale = 'free_y')	+
+	theme_prj() +
+	theme(legend.position = 'none',
+		axis.text.y = element_blank(), plot.margin = unit(c(0,0,0,0), 'cm')) +
+	labs(x = 'Association with Shannon diversity (effect size)', y = '') +
+	scale_x_continuous(breaks = c(-1,0,1), labels = c('-1', '0', '1')) +
+	coord_cartesian(clip = 'off') 
+
+combined <- plot_grid(propBar, p, nrow = 1, rel_widths = c(0.35, 1), align = 'h', axis = 'l')
+save_plot(here('output/Danenberg_reproduction/shannonsBySubtype.pdf'), combined, 
+	base_width = 8, base_height = 3.3)
+```
+```{r}
+
+```
+

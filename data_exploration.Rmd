@@ -28,14 +28,15 @@ library(ggplot2)
 library(tidyverse)
 library(fst)
 source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
 library(patchwork)
 library(cowplot)
+library(caret)
+library(data.table)
 
 cells <- getCells()
 
-cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
-                count(ImageNumber, meta_description)  %>%
-                rename(tnumber=ImageNumber)
+cell_counts <- getCellCounts()
 ```
 
 ## Basic information
@@ -43,7 +44,9 @@ cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
 ```{r}
 print(paste('Number of samples: ', length(unique(cells$ImageNumber))))
 print(paste('Number of cell types: ', length(unique(cells$meta_description))))
-print(paste('cell types: \n', unique(cells$meta_description)))
+
+paste('Cell types:')
+print(unique(cells$meta_description))
 
 ggplot(data= cells %>% count(ImageNumber)) + geom_bar(aes(y=n, x=ImageNumber), stat='identity') + theme_bw() + ggtitle('Total counts per sample')
 
@@ -116,16 +119,11 @@ ggsave(paste(here('output/Data_exploration/'),'NABUCCO_celltypecounts.pdf', sep=
 
 ## Cell type occurences
 In future steps we are going to estimate distances between cell type combinations. Not every combination is present in every sample however.
-We have a high number of samples and this may compensate for the low cell type count. Cell types that are too rare cannot be considered.
+We have a large sample size and this possibly compensates for the low cell type count. Cell types that are too rare cannot be considered.
 
 ```{r}
-cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description, meta_description) %>% rename(phenotype_from = meta_description...2, phenotype_to = meta_description...3) , cell_counts, by.x= c('tnumber',"phenotype_from"), by.y = c('tnumber',"meta_description"), all.x = TRUE) %>%  mutate(n_from = coalesce(n, 0)) %>% select(-c(n))
+cell_occurences_combinations <- getCombinationCounts()
 
-cell_occurences_combinations <- merge(cell_occurences, cell_counts, by.x= c('tnumber',"phenotype_to"), by.y = c('tnumber',"meta_description"), all.x = TRUE)%>%
-                  mutate(n_to = coalesce(n, 0)) %>% select(-c(n))
-
-
-                  
 print(paste('number of samples that cannot be estimated: ', nrow(cell_occurences_combinations %>% filter(n_from == 0 | n_to ==0))))
 
 heatmap_occurences <- function(dataset, occ_number){
@@ -150,6 +148,34 @@ heatmap_occurences(cell_occurences_combinations, 0)
 heatmap_occurences(cell_occurences_combinations, 5)
 heatmap_occurences(cell_occurences_combinations, 10)
 heatmap_occurences(cell_occurences_combinations, 20)
+
+```
+Look in each subtype.
+
+```{r}
+cell_occurences_combinations <- getCombinationCounts()
+
+heatmap_occurences <- function(dataset, occ_number, subtype){
+  cell_occurences_categories <- dataset %>% mutate(category = ifelse(n_to > occ_number & n_from> occ_number, paste(as.character(occ_number),'+',sep=''), as.character(occ_number))) %>%
+                                                                       group_by(phenotype_from, phenotype_to) %>%
+                                                                                      count(category) %>% 
+                                                                      mutate(n = n/ length(unique(dataset %>% pull(tnumber))))
+  
+  df <- cell_occurences_categories %>% filter(category == paste(as.character(occ_number),'+',sep=''))
+
+  trans_df <- xtabs(n ~ phenotype_from + phenotype_to, df)
+  hm <- Heatmap(trans_df, cluster_rows = F, cluster_columns = F, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6),
+                name = paste('sample percentage \n of type', subtype, '\n with', paste(as.character(occ_number),'+',sep=''), 'occ.'), column_title = 'phenotype_to', row_title = 'phenotype_from')
+  
+  print(hm)
+}
+
+heatmap_occurences(cell_occurences_combinations, 0,'ALL')
+subtypes = group_split(clinical_data %>% group_by(`Pam50 + Claudin-low subtype`))
+for (s in 1:length(subtypes)){
+  subtype = subtypes[[s]]
+  heatmap_occurences(cell_occurences_combinations %>% filter(tnumber %in% subtype$ImageNumber), 0,unique(subtype$`Pam50 + Claudin-low subtype`))
+}
 
 ```
 
@@ -184,8 +210,6 @@ ggsave(here('output/Data_exploration/occurence_slope.pdf'))
 Look at the distribution of breast cancer subtypes.
 
 ```{r}
-library(caret)
-
 clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
 clinical_data_ext <- read_tsv(here('DATA/brca_metabric_clinical_data.tsv'))
 # clinical_data_ext <- clinical_data_ext %>% mutate(hormone_status = ifelse())
@@ -199,12 +223,36 @@ table(clinical_data[,2], clinical_data[,3])
   
 }
 
+order <- tibble(intclust = c("IntClust 1", "IntClust 2",  "IntClust 3",  "IntClust 4-", "IntClust 4+", "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8", "IntClust 9",  "IntClust 10"))
+
+# Contingency tables
 contingency_table('PAM50',"Pam50 + Claudin-low subtype")
 contingency_table('PAM50',"3-Gene classifier subtype" )
 contingency_table('IntClust',"Pam50 + Claudin-low subtype" )
-contingency_table('IntClust',"ER Status" )
 
+# Intclust composition
+order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"PR Status" )),by.x='intclust',by.y='row.names') %>% rename('PR_positive' = 'Positive', 'PR_negative' = 'Negative')
+order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"ER Status" )),by.x='intclust',by.y='row.names') %>% rename('ER_positive' = 'Positive', 'ER_negative' = 'Negative')
+order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"HER2 Status" )),by.x='intclust',by.y='row.names') %>% rename('HER2_positive' = 'Positive', 'HER2_negative' = 'Negative')
+melt_order <- reshape2::melt(order, id=c('intclust'))
 
+ggplot(data=melt_order %>% filter(variable=='HER2_positive' | variable=='HER2_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('HER2 counts in Intclusts')
+
+ggplot(data=melt_order %>% filter(variable=='ER_positive' | variable=='ER_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('ER counts in Intclusts')
+
+ggplot(data=melt_order %>% filter(variable=='PR_positive' | variable=='PR_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('PR counts in Intclusts')
+
+order <- tibble(intclust = c("IntClust 1", "IntClust 2",  "IntClust 3",  "IntClust 4-", "IntClust 4+", "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8", "IntClust 9",  "IntClust 10"))
+
+order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"Pam50 + Claudin-low subtype" )),by.x='intclust',by.y='row.names')
+melt_order <- reshape2::melt(order, id=c('intclust'))
+ggplot(data=melt_order) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('PAM50 + claudin-low counts in Intclusts')
+
+# subtypes in data
 ggplot(data = clinical_data) + geom_bar(aes(x=PAM50)) + theme_bw() + ggtitle('breast cancer subtype occurences')
 
 if (params$save_files){
@@ -217,34 +265,19 @@ ggsave(here('output/Data_exploration/subtypes.pdf'))
 Look at sampled images.
 
 ```{r}
-tumor = c("CK^{med}ER^{lo}","ER^{hi}CXCL12^{+}", "CK8-18^{hi}CXCL12^{hi}", "CK^{+} CXCL12^{+}",  "CK8-18^{hi}ER^{lo}", "CK8-18^{+} ER^{hi}",
-           "CK^{lo}ER^{med}", "HER2^{+}","CK^{lo}ER^{lo}")
-other = c("CD4^{+} T cells & APCs", "CD4^{+} T cells","Endothelial", "Fibroblasts","Myofibroblasts PDPN^{+}","CD8^{+} T cells", "Myofibroblasts",  
-          "Macrophages", "CD15^{+}", "MHC I & II^{hi}", "T_{Reg} & T_{Ex}", "CD57^{+}", "Ep Ki67^{+}", "Macrophages & granulocytes",
-          "CD38^{+} lymphocytes","Ki67^{+}", "B cells", "Basal", "Fibroblasts FSP1^{+}", "Granulocytes", "MHC I^{hi}CD57^{+}", "Ep CD57^{+}",
-          "MHC^{hi}CD15^{+}")
 
-HER2 = c("HER2^{+}")
+TME =  c("B cells","CD38^{+} lymphocytes","CD4^{+} T cells","CD4^{+} T cells & APCs","CD57^{+}","CD8^{+} T cells","Endothelial","Fibroblasts","Fibroblasts FSP1^{+}","Granulocytes", "Ki67^{+}","Macrophages","Macrophages & granulocytes", "Myofibroblasts","Myofibroblasts PDPN^{+}", "T_{Reg} & T_{Ex}")
+tumor = setdiff(unique(cells %>% pull(meta_description)), TME)
 
-show_slide <- function(sample_number){
-  slide_1 <- ggplot(data=cells%>% filter(ImageNumber == sample_number) %>% mutate(type = ifelse(meta_description %in% HER2, 'HER2', 'other'))) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=type), alpha =0.5) +
-    theme_bw() + ggtitle(paste('imagenumber: ', sample_number))
-  
-  slide_2 <- ggplot(data=cells%>% filter(ImageNumber == sample_number)) + 
-    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) + 
-    theme_bw() + ggtitle(paste('imagenumber: ', sample_number))
-  
-  return(plot_grid(slide_1, slide_2, n_col=2))
-}
-
-samples = sample(unique(cells$ImageNumber),5)
+samples <- sample(unique(cells$ImageNumber),5)
 
 for (s in samples){
-  print(show_slide(s))
+  print(show_slide(s, tumor))
 }
 
-print(show_slide(1))
-ggsave('output/Slides/exploreslide.pdf', width = 20, height=10)
+i = 1
+print(show_slide(i,tumor))
+ggsave(paste('output/Slides/exploreslide_',i,'.pdf',sep=''), width = 15, height=10)
 ```
 
 ## Expression data

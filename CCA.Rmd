@@ -1,0 +1,249 @@
+---
+title: "CCA"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(CCA)
+library(CCP)
+library(GGally)
+library(caret)
+library(here)
+library(fst)
+source(here("UtilityFunctions.R"))
+
+```
+
+
+Load data
+```{r}
+clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
+
+shape_features <- readRDS(here('scratch/features/shape_parameters.rds'))
+colnames(shape_features) <- paste(colnames(shape_features),"shape",sep="_")
+
+scale_features <- readRDS(here('scratch/features/scale_parameters.rds'))
+colnames(scale_features) <- paste(colnames(scale_features),"scale",sep="_")
+
+density_features <- readRDS(here('scratch/features/cell_proportions_per_image.rds'))
+
+density_features <- density_features %>% filter(ImageNumber != setdiff(density_features$ImageNumber, shape_features$tnumber_shape))
+density_features <- subset(density_features,select = -c(get('isTumour')))
+
+shape_cols <- setdiff(colnames(shape_features), 'tnumber_shape')
+scale_cols <- setdiff(colnames(scale_features), 'tnumber_scale')
+density_cols <- setdiff(colnames(density_features), 'ImageNumber')
+
+# Make sure that the order of features is the same
+cells <- unique(getCells() %>% dplyr::select(c(metabric_id, ImageNumber)))
+
+all_features <- merge(merge(shape_features, scale_features, by.x='tnumber_shape', by.y='tnumber_scale'), density_features, by.x='tnumber_shape',by.y='ImageNumber')
+all_features <- merge(all_features, cells, by.x='tnumber_shape', by.y='ImageNumber', all.x=T)
+all_features <- merge(all_features, clinical_data %>% dplyr::select(c('metabric_id', 'PAM50')), by='metabric_id',all.x = T)
+
+rownames(all_features) <- all_features[,c('tnumber_shape')]
+all_features <- subset(all_features,select = -c(get('tnumber_shape')))
+
+shape_features <- all_features %>% dplyr::select(all_of(shape_cols))
+scale_features <- all_features %>% dplyr::select(all_of(scale_cols))
+density_features <- all_features %>% dplyr::select(all_of(density_cols))
+pam50_features <- all_features %>% dplyr::select('PAM50')
+
+# We filter sparse features out because this gives problems in the eigenvector computation
+shape_features <- shape_features[, which(colMeans(!is.na(shape_features)) > 0.1)]
+scale_features <- scale_features[, which(colMeans(!is.na(scale_features)) > 0.1)]
+density_features <- replace(density_features,is.na(density_features),0)
+density_features <- density_features[, which(colMeans(!(density_features == 0)) > 0.2)]
+
+# One-hot encode categorical feature
+dummy <- dummyVars(" ~ .", data=pam50_features)
+pam50_features <- data.frame(predict(dummy, newdata=pam50_features))
+pam50_features <- replace(pam50_features,is.na(pam50_features),0)
+
+
+```
+
+
+## Canonical Correlation Analysis
+With CCA we find a set of coefficients to combine the features with maximum correlation.
+
+Start with scaling and imputing
+```{r}
+filter_and_impute <- function(m){
+  
+  m <- scale(m)
+  m <- replace(m,is.na(m),0)
+  
+  m <- as.data.frame(m)
+
+  return(m)
+  
+}
+shape_features <- filter_and_impute(shape_features)
+scale_features <- filter_and_impute(scale_features)
+density_features <- filter_and_impute(density_features)
+
+```
+
+
+```{r}
+
+cca <- function(X,Y){
+  cc_results <- cancor(X, Y)
+
+  CC1_X = as.matrix(X) %*% cc_results$xcoef[, 1]
+  CC1_Y = as.matrix(Y) %*% cc_results$ycoef[, 1]
+  
+  CC2_X =as.matrix(X) %*% cc_results$xcoef[, 2]
+  CC2_Y =as.matrix(Y) %*% cc_results$ycoef[, 2]
+  
+  CC3_X =as.matrix(X) %*% cc_results$xcoef[, 3]
+  CC3_Y =as.matrix(Y) %*% cc_results$ycoef[, 3]
+  
+  CC4_X =as.matrix(X) %*% cc_results$xcoef[, 4]
+  CC4_Y =as.matrix(Y) %*% cc_results$ycoef[, 4]
+  
+  CC5_X =as.matrix(X) %*% cc_results$xcoef[, 5]
+  CC5_Y =as.matrix(Y) %*% cc_results$ycoef[, 5]
+  
+  
+  cor(CC1_X,CC1_Y)
+  
+  assertthat::are_equal(cc_results$cor[1], 
+                        cor(CC1_X,CC1_Y)[1])
+  
+  cca_df = tibble(PAM50 = all_features %>% pull(PAM50)) %>% 
+  mutate(CC1_X=CC1_X,
+         CC1_Y=CC1_Y,
+         CC2_X=CC2_X,
+         CC2_Y=CC2_Y,
+         CC3_X=CC3_X,
+         CC3_Y=CC3_Y,
+         CC4_X=CC4_X,
+         CC4_Y=CC4_Y,
+        CC5_X=CC5_X,
+         CC5_Y=CC5_Y,
+         )
+  
+  return(cca_df)
+}
+
+cca_pam_density <- cca(pam50_features, density_features)
+cca_pam_shape <- cca(pam50_features, shape_features)
+cca_pam_scale <- cca(pam50_features, scale_features)
+
+
+```
+
+```{r}
+
+cca_density_scale %>%
+  ggplot(aes(x=CC1_Y,y=CC1_X, color=PAM50))+
+  geom_point()
+
+cca_density_scale %>%
+  ggplot(aes(x=CC2_Y,y=CC2_X, color=PAM50))+
+  geom_point()
+
+
+cca_pam_shape %>% 
+  ggplot(aes(x=PAM50,y=CC5_Y, color=PAM50))+
+  geom_boxplot(width=0.5)+
+  geom_jitter(width=0.15)
+
+
+```
+```{r}
+cc1 <- cc(pam50_features, density_features)
+
+# tests of canonical dimensions
+rho <- cc1$cor
+## Define number of observations, number of variables in first set, and number of variables in the second set.
+n <- dim(pam50_features)[1]
+p <- length(pam50_features)
+q <- length(density_features)
+
+## Calculate p-values using the F-approximations of different test statistics:
+p.asym(rho, n, p, q, tstat = "Wilks")
+
+```
+Variables with relatively larger standardized canonical coefficients contribute more to the variates.
+
+(https://scholarscompass.vcu.edu/cgi/viewcontent.cgi?article=1001&context=socialwork_pubs#:~:text=A%20Canonical%20loading%20measures%20the,%E2%80%9CInterpreting%20the%20Canonical%20Variates.%E2%80%9D )
+
+```{r}
+s1 <- diag(sqrt(diag(cov(density_features))))
+standardized_coef <- s1 %*% cc1$ycoef
+standardized_coef <- cbind(colnames(density_features), as.data.frame(standardized_coef))
+
+get_n_top_contributing_features <- function(df, sign_variates, n_features){
+  result = c()
+  cols <- paste('V',seq(1, sign_variates, by=1),sep='')
+  for (c in cols){
+      data <- standardized_coef[with(standardized_coef,order(-get(c))),]
+      result <- c(result,data[1:n_features,1])
+  }
+  return(unique(result))
+
+}
+
+get_n_top_contributing_features(standardized_coef, 2, 5)
+```
+```{r}
+cc1 <- cc(pam50_features, shape_features)
+
+# tests of canonical dimensions
+rho <- cc1$cor
+## Define number of observations, number of variables in first set, and number of variables in the second set.
+n <- dim(pam50_features)[1]
+p <- length(pam50_features)
+q <- length(shape_features)
+
+## Calculate p-values using the F-approximations of different test statistics:
+p.asym(rho, n, p, q, tstat = "Wilks")
+
+```
+```{r}
+s1 <- diag(sqrt(diag(cov(shape_features))))
+standardized_coef <- s1 %*% cc1$ycoef
+standardized_coef <- cbind(colnames(shape_features), as.data.frame(standardized_coef))
+top_shape <- get_n_top_contributing_features(standardized_coef, 1,50)
+top_shape <- gsub('_shape', '', top_shape, fixed = T)
+
+saveRDS(top_shape, file = here('scratch/top_shape_features.rds')) 
+
+```
+
+
+```{r}
+cc1 <- cc(pam50_features, scale_features)
+
+# tests of canonical dimensions
+rho <- cc1$cor
+## Define number of observations, number of variables in first set, and number of variables in the second set.
+n <- dim(pam50_features)[1]
+p <- length(pam50_features)
+q <- length(scale_features)
+
+## Calculate p-values using the F-approximations of different test statistics:
+p.asym(rho, n, p, q, tstat = "Wilks")
+```
+```{r}
+s1 <- diag(sqrt(diag(cov(scale_features))))
+standardized_coef <- s1 %*% cc1$ycoef
+standardized_coef <- cbind(colnames(scale_features), as.data.frame(standardized_coef))
+top_scale <- get_n_top_contributing_features(standardized_coef, 1,50)
+top_scale <- gsub('_scale', '', top_scale, fixed = T)
+
+saveRDS(top_scale, file = here('scratch/top_scale_features.rds'))
+
+```
+
