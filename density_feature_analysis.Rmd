@@ -1,0 +1,333 @@
+---
+title: "density feature analysis"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: "hide"
+params:
+  save_files:
+    value: FALSE
+    choices:
+      - FALSE
+      - TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(parallel)
+# library(igraph)
+library(here)
+library(fst)
+library(assertthat)
+library(RColorBrewer)
+# library(latex2exp)
+library(cowplot)
+library(ggpubr)
+library(gtools)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library('glmnet', quiet = T)
+library('ROCR', quiet = T)
+library(ComplexHeatmap)
+library(factoextra)
+library(corrplot)
+library(tidyHeatmap)
+
+# set seed
+projectSeed <- 89230689
+set.seed(projectSeed)
+
+outDir <- here('scratch')
+cells <- getCells()
+clinical_data <- read_fst(here('DATA/IMCClinical.fst'))
+clinical_data <- merge(x= clinical_data, unique(cells %>% select(c(ImageNumber, metabric_id))), by.x='metabric_id',by.y='metabric_id', all.y=T)
+
+```
+
+## Cell type densities
+
+```{r}
+# Are we going to scale the rows as well? The sums of each row are always 2 (1 for tumor cells, 1 for TME cells)
+
+cellPhenotypes <- getCellProportionsPerImage()
+density_matrix <- generate_matrix(cellPhenotypes, 'ImageNumber')
+
+library(circlize)
+col_fun = colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
+
+density_hm <- Heatmap(as.matrix(density_matrix %>% select(-c('isTumour'))),name='densities', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
+
+save_pdf(density_hm, here('output/Method_comparison/heatmaps/density_heatmap.pdf'), width=20, height=15)
+
+```
+
+Now perform PCA to separate the samples.
+
+```{r}
+generate_labels <- function(matrix){
+labels <- merge(as_tibble(rownames(density_matrix)), clinical_data, by.x='value', by.y='metabric_id', all.x=T) %>% rename(PAM50 = "PAM50")
+labels <- labels %>% rename(metabric_id = value)%>%
+  mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
+  mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
+  mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
+  mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+  mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
+
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+return(labels)
+}
+
+
+plot_pca <- function(matrix, label){
+  labels = generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'metabric_id'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='metabric_id', all.x=T)
+
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  print(fviz_eig(res.pca))
+  print(fviz_pca_biplot(res.pca, label="var", habillage=matrix_withlabels %>% pull(!!label), addEllipses = T, ellipse.level = 0.95,select.var = list(contrib = 5) ))
+  
+}
+
+plot_pca(density_matrix, 'PAM50')
+ggsave(here('output/Method_comparison/pca_density.pdf'))
+
+plot_pca(density_matrix, 'IntClust')
+ggsave(here('output/Method_comparison/pca_density_IntClust.pdf'))
+
+```
+
+
+
+Now consider tumor and TME cells separately.
+
+```{r}
+TME <- getTumorAndTMETypes()$TME_types
+tumor <- getTumorAndTMETypes()$tumor_types
+TME_colnames = paste(TME, '_CPh',sep='')
+tumor_colnames = paste(tumor, '_CPh', sep='')
+
+tumor_densities <- as.data.frame(cellPhenotypes)[,c(tumor_colnames, 'ImageNumber')]
+tumor_densities <- na.omit(tumor_densities)
+tumor_density_matrix <- generate_matrix(tumor_densities,'ImageNumber')
+
+tumor_density_hm <- Heatmap(as.matrix(tumor_density_matrix),name='densities', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
+
+save_pdf(tumor_density_hm, here('output/Method_comparison/tumor_density_heatmap.pdf'), width=20, height=15)
+
+plot_pca(tumor_density_matrix, 'PAM50')
+ggsave(here('output/Method_comparison/pca_tumor_density.pdf'))
+
+plot_pca(tumor_density_matrix, 'IntClust')
+ggsave(here('output/Method_comparison/pca_tumor_density_IntClust.pdf'))
+
+```
+
+```{r}
+tme_densities <- as.data.frame(cellPhenotypes)[,c(TME_colnames, 'metabric_id')]
+tme_densities <- na.omit(tme_densities)
+tme_density_matrix <- generate_matrix(tme_densities,'metabric_id')
+
+tme_density_hm <- Heatmap(as.matrix(tme_density_matrix),name='densities', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
+
+save_pdf(tme_density_hm, here('output/Method_comparison/tme_density_heatmap.pdf'), width=20, height=15)
+
+plot_pca(tme_density_matrix, 'PAM50')
+ggsave(here('output/Method_comparison/pca_tme_density.pdf'))
+
+plot_pca(tme_density_matrix, 'IntClust')
+ggsave(here('output/Method_comparison/pca_tme_density_IntClust.pdf'))
+
+```
+
+Take a look at the PAM50 patient groups.
+
+```{r}
+subtypes <- unique(merge(density_matrix, clinical_data, by.x='row.names', by.y='metabric_id', all.x=T) %>% pull('PAM50'))
+
+for (s in subtypes){
+  if (is.na(s)){
+      samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(is.na(`PAM50`)) %>% pull(`metabric_id`))) %>% select(-c('isTumour'))
+  
+  }else{
+  samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`metabric_id`))) %>% select(-c('isTumour'))
+  }
+  
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/'),'density_heatmap_',s,'.pdf',sep=''), width=20, height=14)
+  
+}
+```
+
+PAM50 do not have clear cell type density signatures. The subtypes are based on gene signatures of tumor cells. Let's have a look at the type of tumor cells in the subtypes
+
+```{r}
+for (s in subtypes){
+  samples_cellPHenotypes <- tumor_density_matrix %>% filter(rownames(tumor_density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`metabric_id`)))
+  
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=13),cluster_rows = T, cluster_columns = F, col=col_fun)
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/'),'tumor_density_heatmap_',s,'.pdf',sep=''), width=20, height=14)
+  
+}
+
+```
+
+Patients with basal subtypes contain ER+ cells. Lets look at the slides of these patients.
+
+```{r}
+positive_celltypes <- c("ER^{hi}CXCL12^{+}", "CK8-18^{+} ER^{hi}")
+
+Basal_cellPHenotypes <- tumor_densities %>% filter(rownames(tumor_density_matrix) %in% (clinical_data %>% filter(`PAM50` == 'Basal') %>% pull(`ImageNumber`)))
+positive_samples <- Basal_cellPHenotypes %>% filter(get("CK8-18^{+} ER^{hi}_CPh") > 0 | get("ER^{hi}CXCL12^{+}_CPh") > 0)  %>% pull('ImageNumber')
+
+# count_features <- getDensityFeatures()
+# counts_positive_samples <- count_features %>% filter(ImageNumber %in% (positive_samples %>% pull('ImageNumber')))
+
+for (j in 1:10){
+  i = positive_samples[j]
+  s <- show_slide(i,positive_celltypes)
+  print(s)
+  ggsave(paste('output/Slides/basal_slide',i,'.pdf',sep=''), width = 15, height=10)
+}
+
+```
+In some samples the ER+ cell count is very low.
+
+```{r}
+basal_counts <- cells %>% dplyr::count(ImageNumber, meta_description) %>% mutate(type = ifelse((ImageNumber %in% positive_samples),'Basal with ER+ cells','Other types with ER+ cells'))
+
+basal_counts <- merge(basal_counts, clinical_data %>% select(c("ImageNumber", "PAM50")), by='ImageNumber')
+
+ggplot(data=basal_counts %>% filter(meta_description %in% positive_celltypes)) + theme_bw() + geom_boxplot(aes(x=PAM50,y=n,color=meta_description)) + ylim(0,50) + ggtitle('ER+ cell count in samples marked as basal and other types ')
+
+ggplot(data=basal_counts %>% filter(meta_description %in% positive_celltypes)) + theme_bw() + geom_boxplot(aes(x=type,y=n,color=meta_description)) + ylim(0,50) + ggtitle('ER+ cell count in samples marked as basal and other types ')
+
+```
+
+
+Look at the expression of these cells
+
+```{r}
+positive_basal_cells <- cells %>% filter(meta_description %in% positive_celltypes) %>% mutate(type = ifelse((ImageNumber %in% positive_samples),'Basal with ER+ cells','Other types with ER+ cells'))
+ggplot(data=positive_basal_cells) + theme_bw() + xlab('ER expression') + geom_boxplot(aes(x=type, y=ER)) + ylim(0,200) + ggtitle('Meassured ER expression of ER+ cells in samples marked as Basal and other type') + xlab('sample type') + ylab('ER expression')
+
+```
+
+The expression of these cells is not lower as other ER+ cells and are therefore correctly marked as ER+ cells.
+
+```{r}
+subtypes <- setdiff(unique(clinical_data %>% pull(PAM50)), NA)
+cell_count_matrix <- getDensityFeatures() %>% select(-c('isTumour'))
+cell_count_matrix_withlabels <- merge(cell_count_matrix, clinical_data %>% select(c(PAM50, ImageNumber)), by='ImageNumber', all.x=T)
+
+zero_count_result <- tibble(features = colnames(cell_count_matrix)[2:33])
+for (s in 1:length(subtypes)){
+  subset <- t(cell_count_matrix_withlabels %>% filter(`PAM50` == subtypes[[s]]))
+  subset <- subset[2:33,]
+  subset_m <- matrix(as.numeric(subset),    # Convert to numeric matrix
+                    ncol = ncol(subset))
+  zero_count <- rowSums(subset_m != 0)  / ncol(subset_m)
+  zero_count_result <- cbind(zero_count_result, zero_count)
+  
+}
+
+colnames(zero_count_result) <- c('feature', subtypes)
+rownames(zero_count_result) <- zero_count_result$feature
+zero_count_result <- zero_count_result[,-1]
+
+h <- Heatmap(zero_count_result,name='not zero percentage', cluster_columns = F, cluster_rows = T)
+save_pdf(h, here('output/Method_comparison/zero_counts_per_subtype.pdf'),width=10, height=10)
+
+```
+
+
+```{r}
+library(matrixStats)
+
+count_result <- tibble(features = colnames(cell_count_matrix)[2:33])
+for (s in 1:length(subtypes)){
+  subset <- t(cell_count_matrix_withlabels %>% filter(`PAM50` == subtypes[[s]]))
+  subset <- subset[2:33,]
+  subset_m <- matrix(as.numeric(subset),    # Convert to numeric matrix
+                    ncol = ncol(subset))
+  means <- rowMeans(subset_m)
+  count_result <- cbind(count_result, means)
+  
+}
+
+colnames(count_result) <- c('feature', subtypes)
+rownames(count_result) <- count_result$feature
+count_result <- count_result[,-1]
+
+h <- Heatmap(count_result,name='mean count', cluster_columns = F, cluster_rows = F)
+save_pdf(h, here('output/Method_comparison/mean_count_per_subtype.pdf'),width=10, height=10)
+
+count_result <- tibble(features = colnames(cell_count_matrix)[2:33])
+for (s in 1:length(subtypes)){
+  subset <- t(cell_count_matrix_withlabels %>% filter(`PAM50` == subtypes[[s]]))
+  subset <- subset[2:33,]
+  subset_m <- matrix(as.numeric(subset),    # Convert to numeric matrix
+                    ncol = ncol(subset))
+  means <- rowMedians(subset_m)
+  count_result <- cbind(count_result, means)
+  
+}
+
+colnames(count_result) <- c('feature', subtypes)
+rownames(count_result) <- count_result$feature
+count_result <- count_result[,-1]
+
+h <- Heatmap(count_result,name='median count', cluster_columns = F, cluster_rows = F)
+save_pdf(h, here('output/Method_comparison/median_count_per_subtype.pdf'),width=10, height=10)
+
+
+```
+```{r}
+library(matrixStats)
+
+cellPhenotypes_withlabels <- merge(x=cellPhenotypes, y= clinical_data %>% select(c('metabric_id', 'PAM50')), by='metabric_id', all.x=T)
+cellPhenotypes_withlabels <- na.omit(cellPhenotypes_withlabels)
+
+count_result <- tibble(features = colnames(cellPhenotypes_withlabels)[2:33])
+for (s in 1:length(subtypes)){
+  subset <- cellPhenotypes_withlabels %>% filter(`PAM50` == subtypes[[s]])
+  means <- colMeans(subset[,2:33])
+  count_result <- cbind(count_result, means)
+  
+}
+
+colnames(count_result) <- c('feature', subtypes)
+rownames(count_result) <- count_result$feature
+count_result <- count_result[,-1]
+
+h <- Heatmap(count_result,name='mean proportion', cluster_columns = F, cluster_rows = T)
+save_pdf(h, here('output/Method_comparison/mean_proportion_per_subtype.pdf'),width=10, height=10)
+
+count_result <- tibble(features = colnames(cellPhenotypes_withlabels)[2:33])
+for (s in 1:length(subtypes)){
+  subset <- cellPhenotypes_withlabels %>% filter(`PAM50` == subtypes[[s]])
+  means <- apply(subset[,2:33],2,median)
+  count_result <- cbind(count_result, means)
+  
+}
+
+colnames(count_result) <- c('feature', subtypes)
+rownames(count_result) <- count_result$feature
+count_result <- count_result[,-1]
+
+h <- Heatmap(count_result,name='median proportion', cluster_columns = F, cluster_rows = T)
+save_pdf(h, here('output/Method_comparison/median_proportion_per_subtype.pdf'),width=10, height=10)
+```
