@@ -1,22 +1,8 @@
 # Required packages for code
 library(tidyverse)
-# library(ggpubr)
-# library(readxl)
-# library(reshape2)
-# library(dbscan)
-# library(broom)
-# library(zoo)
-# library(knitr)
 library(magrittr)
-# library(NMF,quietly = T)
-# library(MASS)
-# library(car)
-# library(stats)
-# library(spatstat)
-# library(raster)
 library(nlme)
 library(dplyr)
-# library(gridExtra)
 library(here)
 library(tictoc)
 
@@ -41,24 +27,6 @@ xy_data_exc_oct <- readRDS('/opt/home/MEP/scratch/xy_data_exc_oct.rds')
 # Define phenotype combinations to study in data
 combinations <- readRDS('/opt/home/MEP/scratch/combinations_selection.rds')
 # combinations_selection <- combinations
-# combinations_selection <- c("CK8-18^{+} ER^{hi}_to_CK8-18^{+} ER^{hi}") #for debugging
-
-# toCD8_combinations <-  grep("to_CD8^{+} T cells", combinations, value = TRUE, fixed= TRUE)
-# toCD4_combinations <-  grep("to_CD4^{+} T cells", combinations, value = TRUE, fixed=TRUE)
-# toFoxP3_combinations <-  grep("to_T_{Reg}", combinations, value = TRUE, fixed= TRUE)
-# toMacrophage_combinations <-  grep("to_Macrophages$", combinations, value = TRUE)
-# toBcell_combinations <-  grep("to_B cells", combinations, value = TRUE, fixed= TRUE)
-# # toHER2_combinations <- grep("to_HER2^{+}$", combinations, value = TRUE, fixed= TRUE)
-# # toCK818ER_combinations <- grep("to_CK8-18^{+} ER^{hi}$", combinations, value = TRUE, fixed= TRUE)
-# toCK818CXCL12_combinations <- grep("to_CK8-18^{hi}CXCL12^{hi}", combinations, value = TRUE, fixed =TRUE) #Cancer
-# # toERCXCL12_combinations <- grep("to_ER^{hi}CXCL12^{+}}$", combinations, value = TRUE, fixed= TRUE)
-# # toCD15_combinations <- grep("to_CD15^{+}$", combinations, value = TRUE, fixed= TRUE)
-# # toEPCD57_combinations <- grep("to_Ep CD57^{+}$", combinations, value = TRUE, fixed= TRUE)
-
-# first_combinations <- c(toCD8_combinations, toFoxP3_combinations, toMacrophage_combinations,
-#                              toBcell_combinations, toCK818CXCL12_combinations, toCD4_combinations)
-# other_combinations <- combinations[which(!combinations %in% first_combinations)]
-# combinations_selection <- c(first_combinations, other_combinations)
 
 finished_files <- list.files('/opt/home/MEP/scratch/success_models_secondrun/')
 finished_combinations_int <-  finished_files %>% str_replace("success_models_", "")
@@ -243,13 +211,4 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
   
 toc()
 
-# # Attach names, if statement to avoid error
-# if (length(success_models) == length(combinations_selection)){
-#   names(success_models) <- combinations_selection}
-#     
-
-# saveRDS(success_models, file = here('scratch/success_models.rds'))
-
-#If we reach this, all combinations are estimated and we don't have to save intermediate results
-# unlink(here("scratch/success_models"),recursive=TRUE)
 

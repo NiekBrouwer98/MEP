@@ -1,0 +1,264 @@
+---
+title: "Classification_results"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Classification results
+
+This document analyses the findings from the logistic regression experiments in the preditions_fig5.Rmd file.
+We proceed with the following steps:
+1. Identify features that characterize and separate PAM50 subtypes.
+2. Visualize and explain feature selection.
+3. Conclude: is density + distance enough? Hypothetical additonal method measuring network-based or higher-order sturctures.
+4. Identify features that find subclusters in PAM50 subtypes.
+5. Measure association of subclusters with clinical features & structure presence.
+
+```{r}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(ggpubr)
+library(rstatix)
+library(ComplexHeatmap)
+library(factoextra)
+
+```
+
+```{r}
+clinical_data <- getClinical()
+density_features <- getDensityFeatures()
+shape_features <- getShapeFeatures()
+scale_features <- getScaleFeatures()
+
+shape_featuresScaled <- generate_matrix(shape_features, 'tnumber')
+scale_featuresScaled <- generate_matrix(scale_features, 'tnumber')
+```
+
+
+## Step 1 & 2
+```{r}
+generate_boxplot <- function(subtype,df, feature){
+    selected <- merge(df %>% select(all_of(c("ImageNumber", feature))), clinical_data %>% select(c('ImageNumber', 'PAM50')), by='ImageNumber', all.x=T) %>% rename('f' = feature)
+      stat.test <- selected %>%
+     t_test(f ~ PAM50, paired = FALSE, p.adjust.method = "bonf", ref.group = subtype)
+  stat.test <- stat.test %>% add_xy_position(x = 'PAM50')
+  stat.test$custom.label <- ifelse(stat.test$p.adj <= 0.05, stat.test$p.adj, "ns")
+
+  p <- ggboxplot(selected, x='PAM50', y='f') + theme_bw()  +
+    stat_pvalue_manual(stat.test, label = "custom.label") +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.10))) + ylab(feature)
+
+  return(p)
+}
+```
+
+```{r}
+generate_heatmap <- function(subtype, df, features, column_order=T){
+    selected <- df %>% select(any_of(features))
+    subtypes <- merge(tibble('ImageNumber' = rownames(df)), clinical_data %>% select(c('ImageNumber', 'PAM50')), by='ImageNumber', all.x=T) %>% mutate(PAM50 = ifelse(PAM50 == subtype, subtype, 'other')) %>% pull(PAM50)
+    
+    # row_ha = rowAnnotation(subtype = subtypes)
+
+    p <- Heatmap(as.matrix(selected), cluster_columns =  column_order,row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8), row_split = subtypes)
+    return(p)
+}
+```
+
+```{r}
+generate_labels <- function(matrix){
+labels <- merge(as_tibble(rownames(matrix)), clinical_data %>% select(c('ImageNumber', 'PAM50')), by.x='value', by.y='ImageNumber', all.x=T)
+labels <- labels %>% rename(ImageNumber = value)%>%
+  mutate(HER = ifelse(PAM50=='HER2', 'HER2', 'Other')) %>%
+  mutate(LuminalA = ifelse(PAM50=='Luminal A', 'Luminal A', 'Other')) %>%
+  mutate(LuminalB = ifelse(PAM50=='Luminal B', 'Luminal B', 'Other')) %>%
+  mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+  mutate(Norm= ifelse(PAM50=='Normal-like', 'Normal', 'Other'))
+
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+return(labels)
+}
+
+plot_pca <- function(matrix, label){
+  labels <- generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'ImageNumber'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='ImageNumber', all.x=T)
+  
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  print(fviz_eig(res.pca))
+  print(fviz_pca_biplot(res.pca, label="var", habillage=matrix_withlabels %>% pull(label), addEllipses = T, ellipse.level = 0.95,select.var = list(contrib = 5) ))
+  
+}
+
+pca_on_subset <- function(subtype, features){
+  densities <- getDensityFeatures() %>% select(any_of(c('ImageNumber', features[["density"]])))
+  shapes <- getShapeFeatures() %>% rename(ImageNumber = tnumber) %>% select(any_of(c('ImageNumber', features[["shape"]])))
+  scales <- getScaleFeatures() %>% rename(ImageNumber = tnumber) %>% select(any_of(c('ImageNumber', features[["scale"]])))
+  
+  allDF <- merge(merge(densities, shapes, by='ImageNumber', all.x=T, all.y=T),scales, by='ImageNumber', all.x=T, all.y=T)
+
+  allDF_matrix <- generate_matrix(allDF, 'ImageNumber')
+  
+  plot_pca(allDF_matrix, subtype)
+  
+}
+```
+
+
+### Basal
+
+```{r}
+Basal_density_features <- c('Basal', "Ep Ki67^{+}", "MHC^{hi}CD15^{+}","Myofibroblasts", "CD38^{+} lymphocytes")
+
+for (f in Basal_density_features){
+  print(generate_boxplot('Basal', density_features, f))
+}
+
+
+```
+
+
+```{r}
+scale_up <- c('Endothelial_to_Myofibroblasts', 'Myofibroblasts_to_Myofibroblasts', 'Basal_to_Myofibroblasts','CK^{med}ER^{lo}_to_Myofibroblasts',	'CK^{med}ER^{lo}_to_Fibroblasts',	'CK8−18^{hi}CXCL12^{hi}_to_CK8−18^{hi}CXCL12^{hi}', 'CK8−18^{hi}CXCL12^{hi}_to_CK^{med}ER^{lo}','CK^{med}ER^{lo}_to_ER^{hi}CXCL12^{+}','Ep Ki67^{+}_to_CK^{med}ER^{lo}',	'CK^{med}ER^{lo}_to_CK8−18^{hi}CXCL12^{hi}',
+                                            'CK^{+} CXCL12^{+}_to_CK^{med}ER^{lo}','CK^{+} CXCL12^{+}_to_CK^{lo}ER^{lo}','Myofibroblasts_to_CK^{+} CXCL12^{+}')
+  
+scale_down <- c('Macrophages_to_Myofibroblasts PDPN^{+}','Myofibroblasts PDPN^{+}_to_Endothelial','Macrophages_to_CK^{lo}ER^{lo}','Macrophages_to_Macrophages', 'CD8^{+} T cells_to_Myofibroblasts','CK^{lo}ER^{lo}_to_CK^{lo}ER^{lo}','CK^{med}ER^{lo}_to_CK^{lo}ER^{lo}','CK8−18^{hi}CXCL12^{hi}_to_Myofibroblasts', 'Endothelial_to_CK8−18^{hi}CXCL12^{hi}')
+
+features <- c(scale_up, scale_down)
+
+p1 <- generate_heatmap('Basal',scale_featuresScaled, features, column_order = T )
+save_pdf(p1, filename = here('output/Method_comparison/feature_selection/basal_scale.pdf'))
+
+```
+
+```{r}
+Basal_density_features <- c('Basal',  "CD38^{+} lymphocytes")
+features <- list(density = Basal_density_features, shape = c(), scale = c(scale_up))
+pca_on_subset('Bas', features)
+
+```
+
+
+### HER2
+
+```{r}
+generate_boxplot('HER2', density_features,  "CD15^{+}" )
+generate_boxplot('HER2', density_features,  "HER2^{+}" )
+
+```
+```{r}
+shape_up <- c('Fibroblasts_to_CK^{+} CXCL12^{+}', 'CK^{lo}ER^{lo}_to_Endothelial','Myofibroblasts_to_CK^{+} CXCL12^{+}', 'CK^{med}ER^{lo}_to_HER2^{+}')
+shape_down <- c('Fibroblasts_to_Endothelial', 'Endothelial_to_CK^{med}ER^{lo}','CK^{med}ER^{lo}_to_CK^{lo}ER^{lo}','Myofibroblasts_to_CK^{med}ER^{lo}','Fibroblasts_to_Myofibroblasts PDPN^{+}','Myofibroblasts PDPN^{+}_to_CK^{med}ER^{lo}')
+scale_up <- c('Macrophages_to_Fibroblasts')
+
+p1 <- generate_heatmap('HER2',shape_featuresScaled, c(shape_up, shape_down), column_order = T )
+save_pdf(p1, filename = here('output/Method_comparison/feature_selection/HER2_shape.pdf'))
+
+p1 <- generate_heatmap('HER2',scale_featuresScaled, scale_up, column_order = T )
+save_pdf(p1, filename = here('output/Method_comparison/feature_selection/HER2_scale.pdf'))
+```
+
+
+```{r}
+features <- list(density = c("HER2^{+}"), shape = c(shape_up, shape_down), scale = c(scale_up))
+pca_on_subset('HER', features)
+```
+
+
+
+### Luminal A
+```{r}
+LumA_density_features <- c("CK^{+} CXCL12^{+}","CK^{lo}ER^{lo}","CK8-18^{+} ER^{hi}","CK8-18^{hi}CXCL12^{hi}","CK8-18^{hi}ER^{lo}","ER^{hi}CXCL12^{+}", "Endothelial","Fibroblasts"  )
+
+for (f in LumA_density_features){
+  generate_boxplot('Luminal A', density_features,  f )
+}
+
+```
+
+```{r}
+LumA_density_features <- setdiff(LumA_density_features, c("CK^{lo}ER^{lo}","CK8-18^{hi}ER^{lo}","Fibroblasts"))
+scale_up <- c('Macrophages_to_Macrophages')
+
+p1 <- generate_heatmap('Luminal A',scale_featuresScaled, scale_up, column_order = T )
+save_pdf(p1, filename = here('output/Method_comparison/feature_selection/LuminalA_scale.pdf'))
+
+features <- list(density = LumA_density_features, shape = c(), scale = c(scale_up))
+pca_on_subset('PAM50', features)
+```
+
+
+### Luminal B
+
+```{r}
+LumB_density_features <- c("CK^{med}ER^{lo}", "CK^{lo}ER^{med}" )
+
+for (f in LumB_density_features){
+  print(generate_boxplot('Luminal B', density_features,  f ))
+}
+
+```
+```{r}
+LumB_density_features <- c("CK^{med}ER^{lo}")
+scale_up <- c('CK^{lo}ER^{lo}_to_Fibroblasts', 'CK^{lo}ER^{lo}_to_Myofibroblasts' )
+scale_down <- c('CK^{med}ER^{lo}_to_CK^{med}ER^{lo}', 'ER^{hi}CXCL12^{+}_to_CK^{med}ER^{lo}')
+
+p1 <- generate_heatmap('Luminal B',scale_featuresScaled, c(scale_up,scale_down), column_order = T )
+save_pdf(p1, filename = here('output/Method_comparison/feature_selection/LuminalB_scale.pdf'))
+
+features <- list(density = LumB_density_features, shape = c(), scale = c(scale_down, scale_up))
+pca_on_subset('PAM50', features)
+
+
+```
+
+
+
+### Normal-like
+
+```{r}
+generate_boxplot('Normal-like', density_features, "B cells" )
+generate_boxplot('Normal-like', density_features, "Myofibroblasts PDPN^{+}" )
+
+```
+### ALL
+
+```{r}
+generate_boxplot <- function(df, feature){
+    selected <- merge(df %>% select(all_of(c("ImageNumber", feature))), clinical_data %>% select(c('ImageNumber', 'PAM50')), by='ImageNumber', all.x=T) %>% rename('f' = feature)
+    
+    compare_means(f ~ PAM50,  data = selected,
+              ref.group = ".all.", method = "t.test")
+    
+    # Visualize the expression profile
+    p <- ggboxplot(selected, x = 'PAM50', y = 'f', color = "PAM50",
+              add = "jitter", legend = "none") +
+      ylab(feature) +
+      rotate_x_text(angle = 45)+
+      geom_hline(yintercept = mean(selected$f), linetype = 2)+ # Add horizontal line at base mean
+      stat_compare_means(method = "anova", label.y = 1600)+        # Add global annova p-value
+      stat_compare_means(label = "p.format", method = "t.test",
+                         ref.group = ".all.", hide.ns = TRUE)      # Pairwise comparison against all
+
+
+  return(p)
+}
+
+for (f in getTumorAndTMETypes()$tumor_types){
+  print(generate_boxplot(density_features,  f ))
+}
+
+for (f in getTumorAndTMETypes()$TME_types){
+  print(generate_boxplot(density_features,  f ))
+}
+```
+

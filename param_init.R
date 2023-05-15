@@ -34,8 +34,9 @@ message(length(combinations_selection), " combinations: ", combinations_selectio
 
 tic('parameter initialization')
 
-#comment out, because this is already done and saved as all_combos_dists.rds
+## Recreate 1_NN histograms from coordinates
 
+#comment out, because this is already done and saved as all_combos_dists.rds
 # all_combos_dists <- do.call(rbind, mclapply(combinations_selection, mc.cores = 25, function(combi){
 #   # Recreate 1-NN histogram from coordinates (this is required for function "fitdistrplus")
 #   dists_onecombi <- tibble()
@@ -113,10 +114,4 @@ initial_parameters <-mclapply(combinations_selection, mc.cores = 14, function(c)
 
 toc()
 # Last run: 73876.134 s
-
-# Save final result
-# saveRDS(initial_parameters, file = here('scratch/initial_parameters_secondrun.rds'))
-
-# If we reach this, all combinations are initialized and we don't have to save intermediate results
-# unlink(here("scratch/init_parameters"),recursive=TRUE) #comment/uncomment
 

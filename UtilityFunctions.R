@@ -86,7 +86,12 @@ getPanel <- function(){
 #'@return data.table of formatted clincial data
 getClinical <- function() {
   clinical <- read_fst(here('DATA/IMCClinical.fst'), as.data.table = T)
-  return(clinical)
+  cells <- getCells()
+  imagenumber_metaid <- cells %>% distinct(ImageNumber, metabric_id)
+  
+  clinical_data <- merge(clinical, imagenumber_metaid, by='metabric_id', all.y=T)
+  
+  return(clinical_data)
 }
 
 

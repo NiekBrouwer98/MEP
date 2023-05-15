@@ -1,0 +1,331 @@
+---
+title: "alternative_clustering"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Alternative clustering
+
+The logistic regression experiments have shown that it is often difficult to separate PAM50 subtypes based on density and distance features.
+There is too much heterogeneity within the PAM50 groups. In this document we are going to explore this heterogeneity and aim to find subclusters in the PAM50 subtypes and cohort-wide.
+
+
+```{r}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(ggpubr)
+library(rstatix)
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(factoextra)
+library(plotly)
+library(cluster)
+library(dendextend)
+library(M3C)
+library(umap)
+
+set.seed(123)
+
+```
+
+```{r}
+clinical_data <- getClinical()
+density_features <- getDensityFeatures()
+shape_features <- getShapeFeatures()
+scale_features <- getScaleFeatures()
+
+density_featuresScaled <- generate_matrix(density_features[,1:33], 'ImageNumber')
+shape_featuresScaled <- generate_matrix(shape_features, 'tnumber')
+scale_featuresScaled <- generate_matrix(scale_features, 'tnumber')
+
+containsTumour <- density_features %>% select(c('ImageNumber', 'isTumour'))
+estimationCounts <- readRDS(here('scratch/estimationCounts.rds'))
+
+```
+
+```{r}
+gap_statistic <- function(subtype,density_features,distance_features){
+    if (subtype == 'ALL'){
+      imgs <- intersect(clinical_data %>% pull(ImageNumber), containsTumour %>% filter(isTumour == T)  %>% pull(ImageNumber))
+      name = 'ALL'
+  }else{
+      imgs <- intersect(clinical_data %>% filter(PAM50 == subtype) %>% pull(ImageNumber), containsTumour %>% pull(ImageNumber))
+      name = subtype
+  }
+  
+  density_df <- density_featuresScaled %>% filter(row.names(density_featuresScaled) %in% imgs) %>% select(all_of(density_features))
+  shape_df <- shape_featuresScaled %>% filter(row.names(shape_featuresScaled) %in% imgs) %>% select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_featuresScaled %>% filter(row.names(scale_featuresScaled) %in% imgs) %>% select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  df <- df %>% select(-c('Row.names'))
+  
+  gap_stat <- clusGap(df, FUN = kmeans, nstart = 25,K.max = 10, B = 10)
+  print(gap_stat, method = "firstmax")
+  print(fviz_gap_stat(gap_stat))
+
+}
+
+
+kmeans_clustering <- function(subtype,density_features,distance_features,cluster_n){
+  if (subtype == 'ALL'){
+      imgs <- intersect(clinical_data %>% pull(ImageNumber), containsTumour %>% filter(isTumour == T)  %>% pull(ImageNumber))
+      name = 'ALL'
+  }else{
+      imgs <- intersect(clinical_data %>% filter(PAM50 == subtype) %>% pull(ImageNumber), containsTumour %>% pull(ImageNumber))
+      name = subtype
+  }
+  
+  density_df <- density_featuresScaled %>% filter(row.names(density_featuresScaled) %in% imgs) %>% select(all_of(density_features))
+  shape_df <- shape_featuresScaled %>% filter(row.names(shape_featuresScaled) %in% imgs) %>% select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_featuresScaled %>% filter(row.names(scale_featuresScaled) %in% imgs) %>% select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  row_ha = rowAnnotation(subtype = merge(df %>% select('Row.names'), clinical_data %>% select('ImageNumber', 'PAM50'), by.x='Row.names', by.y='ImageNumber', all.x=T) %>% pull(PAM50), col = list(subtype = c("Basal" = "yellow", "HER2" = "green", "Luminal A" = "purple", 'Luminal B' = 'pink', 'Normal-like' = 'grey')
+    ))
+
+  df <- df %>% select(-c('Row.names'))
+
+  km.res <- kmeans(df, cluster_n , nstart = 25)
+  print(fviz_cluster(km.res, df, ellipse.type = "norm"))
+
+  p <- Heatmap(name = name, as.matrix(df), cluster_columns = T, column_names_gp = gpar(fontsize=2), row_split = km.res$cluster, right_annotation = row_ha)
+  save_pdf(p, paste(here('output/Alternative_clustering/'), name, 'ClustersHM.pdf',sep=''))
+
+  return(km.res)
+  
+}
+
+consensus_test <- function(subtype,density_features,distance_features){
+    if (subtype == 'ALL'){
+      imgs <- intersect(clinical_data %>% pull(ImageNumber), containsTumour %>% filter(isTumour == T)  %>% pull(ImageNumber))
+      name = 'ALL'
+  }else{
+      imgs <- intersect(clinical_data %>% filter(PAM50 == subtype) %>% pull(ImageNumber), containsTumour %>% pull(ImageNumber))
+      name = subtype
+  }
+  
+  density_df <- density_featuresScaled %>% filter(row.names(density_featuresScaled) %in% imgs) %>% select(all_of(density_features))
+  shape_df <- shape_featuresScaled %>% filter(row.names(shape_featuresScaled) %in% imgs) %>% select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_featuresScaled %>% filter(row.names(scale_featuresScaled) %in% imgs) %>% select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  row_ha = HeatmapAnnotation(subtype = merge(df %>% select('Row.names'), clinical_data %>% select('ImageNumber', 'PAM50'), by.x='Row.names', by.y='ImageNumber', all.x=T) %>% pull(PAM50), col = list(subtype = c("Basal" = "yellow", "HER2" = "green", "Luminal A" = "purple", 'Luminal B' = 'pink', 'Normal-like' = 'grey')
+    ))
+
+  df <- df %>% select(-c('Row.names'))
+  
+  test <- M3C(data.frame(df))
+}
+
+hierarchical_clustering <- function(subtype,density_features,distance_features,cluster_n){
+    if (subtype == 'ALL'){
+      imgs <- intersect(clinical_data %>% pull(ImageNumber), containsTumour %>% filter(isTumour == T)  %>% pull(ImageNumber))
+      name = 'ALL'
+  }else{
+      imgs <- intersect(clinical_data %>% filter(PAM50 == subtype) %>% pull(ImageNumber), containsTumour %>% pull(ImageNumber))
+      name = subtype
+  }
+  
+  density_df <- density_featuresScaled %>% filter(row.names(density_featuresScaled) %in% imgs) %>% select(all_of(density_features))
+  shape_df <- shape_featuresScaled %>% filter(row.names(shape_featuresScaled) %in% imgs) %>% select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_featuresScaled %>% filter(row.names(scale_featuresScaled) %in% imgs) %>% select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  row_ha = HeatmapAnnotation(subtype = merge(df %>% select('Row.names'), clinical_data %>% select('ImageNumber', 'PAM50'), by.x='Row.names', by.y='ImageNumber', all.x=T) %>% pull(PAM50), col = list(subtype = c("Basal" = "yellow", "HER2" = "green", "Luminal A" = "purple", 'Luminal B' = 'pink', 'Normal-like' = 'grey')
+    ))
+
+  df <- df %>% select(-c('Row.names'))
+
+  
+  dist_mat <- dist(df, method = 'euclidean')
+  hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+
+  cut_avg <- cutree(hclust_avg, k = cluster_n)
+  
+  avg_dend_obj <- as.dendrogram(hclust_avg)
+  avg_col_dend <- color_branches(avg_dend_obj, k = cluster_n)
+  plot(avg_col_dend)
+  
+  p <- Heatmap(name = name, t(as.matrix(df)), cluster_columns = T,cluster_rows=T, column_names_gp = gpar(fontsize=2), row_names_gp = gpar(fontsize=1), column_split = cut_avg, top_annotation = row_ha)
+  save_pdf(p, paste(here('output/Alternative_clustering/'), name, 'HCClustersHM.pdf',sep=''))
+  
+  return(cut_avg)
+}
+
+```
+
+```{r}
+generate_labels <- function(matrix){
+  labels <- merge(as_tibble(rownames(matrix)), clinical_data, by.x='value', by.y='ImageNumber', all.x=T) %>% 
+    rename(tnumber = value) %>% mutate(tnumber = as.numeric(tnumber))
+  labels <- labels %>%
+    mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
+    mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
+    mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
+    mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+    mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
+
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+ return(labels) 
+}
+
+
+generate_UMAP <- function(matrix, title){
+  labels =generate_labels(matrix)
+  umap <- umap(matrix)
+  umap <- umap$layout %>%
+  as.data.frame()%>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>%
+  mutate(tnumber=row_number())%>%
+  inner_join(labels, by='tnumber')
+
+  return(umap %>%
+  ggplot(aes(x = UMAP1, 
+             y = UMAP2, 
+             color = PAM50))+
+  geom_point()+ theme_bw() +
+  labs(x = "UMAP1",
+       y = "UMAP2",
+      subtitle = title))
+}
+```
+
+
+```{r}
+type <- 'Basal'
+
+selected_features <- density_features %>% filter(`CK^{med}ER^{lo}` > 20)  %>% select(c(`ImageNumber`,type))
+dist_df <- merge(shape_features %>% rename_with( ~ paste0("shape_", .x)) , scale_features %>% rename_with( ~ paste0("scale_", .x)), by.x= 'shape_tnumber', by.y='scale_tnumber')
+df <- merge(selected_features, dist_df, by.x='ImageNumber', by.y='shape_tnumber', all.x=T)
+
+df_scaled <- generate_matrix(df, 'ImageNumber', NULL, NA_percentage = 0.5)
+# df_scaled <- df_scaled %>% select(grep(type, colnames(df_scaled), fixed = T, value = T))
+
+test <- M3C(data.frame(df_scaled))
+
+row_ha = HeatmapAnnotation(subtype = merge(tibble('Row.names' = rownames(df_scaled)), clinical_data %>% select('ImageNumber', 'PAM50'), by.x='Row.names', by.y='ImageNumber', all.x=T) %>% pull(PAM50), col = list(subtype = c("Basal" = "yellow", "HER2" = "green", "Luminal A" = "purple", 'Luminal B' = 'pink', 'Normal-like' = 'grey')
+    ))
+
+dist_mat <- dist(df_scaled, method = 'euclidean')
+hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+
+cut_avg <- cutree(hclust_avg, k = 6)
+
+avg_dend_obj <- as.dendrogram(hclust_avg)
+avg_col_dend <- color_branches(avg_dend_obj, k = 6)
+plot(avg_col_dend)
+
+p <- Heatmap(t(as.matrix(df_scaled)), cluster_columns = T, cluster_rows = T, column_names_gp = gpar(fontsize=2), row_names_gp = gpar(fontsize=2), column_split = cut_avg,top_annotation = row_ha)
+save_pdf(p, paste(here('output/Alternative_clustering/'), 'HCClustersBasalSelection.pdf',sep=''))
+
+
+```
+
+
+
+## PAM50 subclusters
+
+```{r}
+Basal_density_features <- c('Basal', "Ep Ki67^{+}", "MHC^{hi}CD15^{+}","Myofibroblasts", "CD38^{+} lymphocytes")
+dist_features <- rownames(estimationCounts %>% filter(Basal > 0.5))
+# gap_statistic('Basal', Basal_density_features, dist_features)
+
+```
+
+```{r}
+
+print(generate_UMAP(density_featuresScaled %>% select(all_of(Basal_density_features)),'UMAP plot of density parameters'))
+print(generate_UMAP(shape_featuresScaled %>% select(all_of(dist_features)),'UMAP plot of shape parameters'))
+print(generate_UMAP(scale_featuresScaled %>% select(all_of(dist_features)),'UMAP plot of scale parameters'))
+
+Basal_result <- kmeans_clustering('Basal', Basal_density_features, dist_features, 6)
+
+consensus_test('Basal', Basal_density_features, dist_features)
+hierarchical_clustering('Basal', Basal_density_features, dist_features, 6)
+# p <- Heatmap(Basal_result[["centers"]], cluster_columns = F, cluster_rows = F,row_names_gp = gpar(fontsize=12), column_names_gp = gpar(fontsize=3))
+# save_pdf(p, here('output/Alternative_clustering/BasalClusterMeansHM.pdf'))
+
+```
+
+
+
+```{r}
+HER2_density_features <- c( "HER2^{+}" )
+dist_features <- rownames(estimationCounts %>% filter(HER2 > 0.5))
+# gap_statistic('HER2', Basal_density_features, dist_features)
+
+```
+
+```{r}
+HER2_result <- kmeans_clustering('HER2', HER2_density_features,dist_features,3)
+hierarchical_clustering('HER2', HER2_density_features,dist_features,5,test=F)
+```
+
+
+```{r}
+LumA_density_features <- c("CK^{+} CXCL12^{+}","CK^{lo}ER^{lo}","CK8-18^{+} ER^{hi}","CK8-18^{hi}CXCL12^{hi}","CK8-18^{hi}ER^{lo}","ER^{hi}CXCL12^{+}", "Endothelial","Fibroblasts")
+dist_features <- rownames(estimationCounts %>% filter(`Luminal A` > 0.5))
+# gap_statistic('Luminal A', Basal_density_features, dist_features)
+
+```
+```{r}
+LumA_result <- kmeans_clustering('Luminal A', LumA_density_features,dist_features,5)
+consensus_test('Luminal A', LumA_density_features,dist_features)
+hierarchical_clustering('Luminal A', LumA_density_features,dist_features,9)
+
+```
+
+
+```{r}
+LumB_density_features <- c("CK^{med}ER^{lo}", "CK^{lo}ER^{med}" )
+dist_features <- rownames(estimationCounts %>% filter(`Luminal B` > 0.5))
+# gap_statistic('Luminal B', Basal_density_features, dist_features)
+
+
+```
+```{r}
+LumB_result <- kmeans_clustering('Luminal B', LumB_density_features,dist_features,4)
+consensus_test('Luminal B', LumB_density_features,dist_features)
+hierarchical_clustering('Luminal B', LumB_density_features,dist_features,4)
+
+```
+
+
+```{r}
+Normal_density_features <- c("B cells" , "Myofibroblasts PDPN^{+}")
+dist_features <- rownames(estimationCounts %>% filter(`Normal-like` > 0.5))
+# gap_statistic('Normal-like', Basal_density_features, dist_features)
+
+```
+
+```{r}
+Normal_result <- kmeans_clustering('Normal-like', Normal_density_features,dist_features,8)
+consensus_test('Normal-like', Normal_density_features,dist_features)
+hierarchical_clustering('Normal-like', Normal_density_features,dist_features,8)
+
+```
+
+
+```{r}
+features <- rownames(estimationCounts %>% filter(rank_percentage <= 10))
+# gap_statistic('ALL', colnames(density_featuresScaled),features)
+
+```
+```{r}
+ALL_result <- kmeans_clustering('ALL', colnames(density_featuresScaled),features,8)
+consensus_test('ALL', colnames(density_featuresScaled),features)
+hierarchical_clustering('ALL', colnames(density_featuresScaled),features,10)
+
+```
+

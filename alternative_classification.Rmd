@@ -1,0 +1,150 @@
+---
+title: "alternative_classification"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(patchwork)
+library(cowplot)
+library(caret)
+library(data.table)
+
+cells <- getCells()
+cell_counts <- getCellCounts()
+clinical_data <- getClinical()
+cell_occurences_combinations <- getCombinationCounts()
+all_parameters <- getALLParameters()
+
+
+```
+
+## Alternative classification
+What percentage of the combinations is succesfully estimated for different from and to counts?
+
+```{r}
+settings <- tibble(from = seq(1,50),to = seq(1,50)) %>% tidyr::expand(from,to)
+for (i in 1:nrow(settings)){
+  t <- cell_occurences_combinations %>% filter(n_from >= settings[i,'from'][[1]] & n_to >= settings[i,'to'][[1]])
+  settings[i,'percentage'] <- nrow(t %>% filter(unique_sample %in% all_parameters$unique_sample))/nrow(t)*100
+}
+
+ggplot(settings,aes(from, to)) + geom_tile(aes(fill=percentage)) + geom_text(aes(label=round(percentage)),size=1) +   scale_fill_gradientn(colours=c("white", "blue"), limits = c(95,100),name='succesful estimation %') + theme_bw()
+ggsave(here('output/Distance_results/Missing_estimations_analysis/matrix.pdf'))
+
+
+```
+
+How many combinations fulfill the min 20 from, 5 to requirement?
+```{r}
+print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5))/nrow(cell_occurences_combinations)*100)
+
+```
+We are not interested in all combinations. How much of the interesting combinations have we estimated?
+```{r}
+cancer_cells <- getTumorAndTMETypes()$tumor_types
+stromal_cells <- c("B cells", "CD4^{+} T cells",  "CD8^{+} T cells",  "Macrophages")
+
+nrow(all_parameters %>% filter(phenotype_from %in% c(cancer_cells, stromal_cells) & phenotype_to %in% c(cancer_cells,stromal_cells)))/nrow(cell_occurences_combinations  %>% filter(phenotype_from %in% c(cancer_cells, stromal_cells) & phenotype_to %in% c(cancer_cells,stromal_cells) & n_from > 20 & n_to > 5))
+
+```
+
+
+
+Can we improve this number with alternative classification?
+```{r}
+
+alternativeClassification <- function(mergelist,removelist){
+  names <- names(mergelist)
+  for (m in 1:length(mergelist)){
+      cell_counts <- cell_counts %>% mutate(meta_description = ifelse(meta_description %in% mergelist[[m]], names[[m]], meta_description))
+
+  }
+  
+  cell_counts <- cell_counts %>% group_by(tnumber, meta_description) %>% dplyr::summarise(n = sum(n))  %>% 
+  ungroup()
+  
+  cell_counts <- cell_counts %>% filter(!(meta_description %in% removelist))
+  
+  
+  return(cell_counts)
+} 
+
+
+getCombinationCounts <- function(cellcounts){
+  cell_counts_to <- cellcounts %>% rename(n_to = n)
+  cell_counts_from <- cellcounts %>% rename(n_from = n)
+  
+  expand_cell_combinations <- cell_counts_to %>% tidyr::expand(tnumber, meta_description, meta_description) %>% 
+    rename(phenotype_from = meta_description...2) %>% 
+    rename(phenotype_to = meta_description...3)
+  
+  combination_counts <- merge(expand_cell_combinations, cell_counts_from, by.x=c('tnumber', 'phenotype_from'), by.y=c('tnumber', 'meta_description'))
+  combination_counts <- merge(combination_counts, cell_counts_to, by.x= c('tnumber', 'phenotype_to'), by.y=c('tnumber', 'meta_description'))
+  combination_counts <- combination_counts %>%
+    unite('phenotype_combo', c(phenotype_from, phenotype_to), sep= '_to_', remove=F) %>%
+    unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+  
+  return(combination_counts)
+  
+}
+
+testMerge <- function(merge,remove){
+  df <- getCombinationCounts(alternativeClassification(merge,remove))
+  print('percentage of combinations that fulfill 20-5 criteria')
+  print(nrow(df %>% filter(n_from >= 20 & n_to >= 5))/nrow(df)*100)
+  print('instead of: ')
+  print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5))/nrow(cell_occurences_combinations)*100)
+}
+
+
+tumorTME <- list(tumor = getTumorAndTMETypes()$tumor_types)
+alternative2 <- list(MHC = grep('MHC', unique(cells$meta_description), value=T, fixed=T), ER =  c( "ER^{hi}CXCL12^{+}" , "CK8-18^{+} ER^{hi}", "CK^{lo}ER^{med}"), otherCancer = c( "CK^{med}ER^{lo}", "CK^{+} CXCL12^{+}", "CK8-18^{hi}CXCL12^{hi}","CK8-18^{hi}ER^{lo}" ))
+
+testMerge(alternative2, c("CK^{lo}ER^{lo}", "CD15^{+}",  "Ep Ki67^{+}", "Ki67^{+}","Macrophages & granulocytes"))
+```
+```{r}
+all_possible_samples <- cell_occurences_combinations %>% filter(n_to >= 5 & n_from >= 20) %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+print(nrow(cell_occurences_combinations %>% filter(n_to >= 5 & n_from >= 20)))
+
+ggplot(data=(all_possible_samples %>% mutate(n_p = (n/794) * 100))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=n_p)) + geom_text(aes(x=phenotype_from, y=phenotype_to, label=n),size=1,color='white') +   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+ggsave(here('output/Distance_results/Missing_estimations_analysis/allpossibleHM.pdf'),width=7,height=6)
+
+alternative_combination_count <- getCombinationCounts(alternativeClassification(alternative2,list()))
+
+print(nrow(alternative_combination_count %>% filter(n_to >= 5 & n_from >= 20)))
+
+alternative_possibilities_counts <- alternative_combination_count %>% filter(n_to >= 5 & n_from >= 20) %>% dplyr::count(phenotype_combo)  %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+ggplot(data=(alternative_possibilities_counts  %>% mutate(n_p = (n/794)*100))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=n_p)) + geom_text(aes(x=phenotype_from, y=phenotype_to, label=n),size=1,color='white') +   
+         theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave(here('output/Distance_results/Missing_estimations_analysis/allpossibleHM_withalternativeClustering.pdf'),width=7,height=6)
+```
+
+```{r}
+cell_counts_alternative <- alternativeClassification(alternative2)
+total <- cell_counts_alternative %>% mutate(type = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, 'epi', 'TME')) %>% group_by(tnumber, type) %>% summarise(total_n = sum(n))
+total <- dcast(total, tnumber ~ type)
+cell_counts_alternative <- merge(cell_counts_alternative, total, by='tnumber',all.x=T)
+cell_counts_alternative <- cell_counts_alternative %>% mutate(percentage = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, n/epi, n/TME))
+
+ggplot(cell_counts_alternative %>% filter(percentage > 0.05) %>% mutate(n = ifelse(n > 200, 200, n))) + geom_histogram(aes(x=percentage),binwidth = 0.05) + facet_wrap(vars(meta_description)) + theme_bw() + xlab('proportion epithelial or TME')
+ggsave(here('output/Data_exploration/alternativecellproportionsHistograms.pdf'),height=15,width=20)
+```
+

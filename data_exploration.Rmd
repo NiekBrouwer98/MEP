@@ -212,7 +212,7 @@ Look at the distribution of breast cancer subtypes.
 ```{r}
 clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
 clinical_data_ext <- read_tsv(here('DATA/brca_metabric_clinical_data.tsv'))
-# clinical_data_ext <- clinical_data_ext %>% mutate(hormone_status = ifelse())
+clinical_data_Rueda <- read.delim(here('DATA/41586_2019_1007_MOESM8_ESM.txt')) #https://www-nature-com.tudelft.idm.oclc.org/articles/s41586-019-1007-8#MOESM7
 
 contingency_table <- function(feature1, feature2){
   clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
@@ -228,7 +228,34 @@ order <- tibble(intclust = c("IntClust 1", "IntClust 2",  "IntClust 3",  "IntClu
 # Contingency tables
 contingency_table('PAM50',"Pam50 + Claudin-low subtype")
 contingency_table('PAM50',"3-Gene classifier subtype" )
-contingency_table('IntClust',"Pam50 + Claudin-low subtype" )
+contingency_table('IntClust',"Integrative Cluster" )
+contingency_table('ERStatus',"ER Status" )
+contingency_table('ERStatus',"ER status measured by IHC" )
+
+
+contingency_table_withindata <- function(feature1, feature2){
+  clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
+                         clinical_data %>% select(c('metabric_id', feature2)), by.x='metabric_id', by.y='metabric_id',
+                         all.x=T)
+table(clinical_data[,2], clinical_data[,3])
+  
+}
+contingency_table_withindata('PAM50',"ERStatus" )
+
+contingency_table_Rueda <- function(feature1, feature2){
+  clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
+                         clinical_data_Rueda %>% select(c('METABRIC.ID', feature2)), by.x='metabric_id', by.y='METABRIC.ID',
+                         all.x=T)
+table(clinical_data[,2], clinical_data[,3])
+  
+}
+
+contingency_table_Rueda('PAM50', "Pam50Subtype" )
+contingency_table_Rueda('IntClust',"iC10" )
+contingency_table_Rueda('ERStatus',"ER.Expr")
+contingency_table_Rueda('ERStatus',"ER.Status")
+
+
 
 # Intclust composition
 order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"PR Status" )),by.x='intclust',by.y='row.names') %>% rename('PR_positive' = 'Positive', 'PR_negative' = 'Negative')
