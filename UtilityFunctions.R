@@ -1,3 +1,5 @@
+library(fst)
+
 #' Load antibody panel details
 #' 
 #' Loads and formats antibody panel
@@ -41,7 +43,7 @@ getPanel <- function(){
   nicelabs("c-erbB-2", "her2_3b5", "HER2 (3B5)", "3B5")  
   nicelabs("c-erbB-2", "her2_d8f12", "HER2 (D8F12)", "D8F12")  
   
-  panel[metaltag == "Ir191", var_name := "DNA1"]  
+  panel[metaltatC == "Ir191", var_name := "DNA1"]  
   panel[metaltag == "Ir193", var_name := "DNA2"]
   panel[is.na(var_label), var_label := target]
   panel[var_label=="", var_label := var_name]
@@ -85,7 +87,7 @@ getPanel <- function(){
 #'
 #'@return data.table of formatted clincial data
 getClinical <- function() {
-  clinical <- read_fst(here('DATA/IMCClinical.fst'), as.data.table = T)
+  clinical <- read_csv(here('DATA/ClinicalMerged.csv'))
   cells <- getCells()
   imagenumber_metaid <- cells %>% distinct(ImageNumber, metabric_id)
   
@@ -100,6 +102,7 @@ getClinical <- function() {
 #'@return data.table of formatted single cell data
 getCells <- function() {
   cells <- read_fst(here('DATA/SingleCells.fst'), as.data.table = T)
+  # cells <- cells %>% mutate(meta_description = gsub("[^A-Za-z0-9+\\-]", "", meta_description))
   return(cells)
 }
 
@@ -132,10 +135,20 @@ getSubtypeCols <- function(){
     'IntClust 9' = '#EE82EE',
     'IntClust 10' = '#7D26CD'
     )
+  
+  molecular <- 
+    c(
+      'ER+HER2+' = '#FF5500',
+      'ER-HER2+' = '#00EE76',
+      'ER+HER2-' = '#CD3278',
+      'ER-HER2-' = '#00C5CD'
+
+    )
 
   return(list(
     PAM50 = pam50,
-    IntClust = intclust
+    IntClust = intclust,
+    molecularSubtypes = molecular
   ))
 }
 

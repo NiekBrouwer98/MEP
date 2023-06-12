@@ -1,0 +1,170 @@
+---
+title: "cohort_subdivision"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Regional subtypes
+
+Both molecular and PAM50 subtypes are diverse in cell type content. This is because of two reasons: cell type stratification is not strict and the classification allows a variety of cells in a class. Secondly, the images are a small sample of the total tumor. The absence of cells doesn't mean that cells are absent in the entire tumor. We therefore divide patient groups further in subtype regions.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(here)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library('glmnet', quiet = T)
+library('ROCR', quiet = T)
+library(ComplexHeatmap)
+library(factoextra)
+library(corrplot)
+library(tidyHeatmap)
+library(circlize)
+
+clinical_data <- getClinical()
+
+```
+```{r}
+generate_labels <- function(matrix){
+labels <- merge(x = as_tibble(rownames(matrix)), y = clinical_data, by.x='value', by.y='ImageNumber', all.x=T)
+labels <- labels %>% rename(ImageNumber = value)
+labels <- labels %>% mutate(ImageNumber = as.integer(labels$ImageNumber))
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+return(labels)
+}
+
+plot_pca <- function(matrix, label){
+  labels = generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'ImageNumber'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='ImageNumber', all.x=T)
+
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  # print(fviz_eig(res.pca))
+  return(fviz_pca_biplot(res.pca, label="var", habillage=matrix_withlabels %>% pull(!!label), addEllipses = T, ellipse.level = 0.95,select.var = list(contrib = 5) ))
+  
+}
+
+generate_UMAP <- function(matrix){
+  labels <- generate_labels(matrix)
+  umap <- umap(matrix)
+  umap <- umap$layout %>%
+  as.data.frame()%>%
+  rename(UMAP1="V1",
+         UMAP2="V2") %>%
+  mutate(ImageNumber=row_number())%>%
+  inner_join(labels, by='ImageNumber')
+
+  return(umap %>%
+  ggplot(aes(x = UMAP1, 
+             y = UMAP2, 
+             color = ER_HER2_status))+
+  geom_point()+ theme_bw() +
+  labs(x = "UMAP1",
+       y = "UMAP2",
+      subtitle = 'Umap'))
+}
+```
+
+```{r}
+computeEstimationPercentages <- function(matrix){
+  na_count <-sapply(matrix, function(y) sum(length(which(is.na(y)))))
+  estimation_count <-  1- (na_count / nrow(matrix))
+  estimation_count <- data.frame(estimation_count)
+  estimations <- as_tibble(data.frame(feature = colnames(matrix),estimation_count))
+
+  estimations <- estimations %>% filter(!(feature %in% c('tnumber', 'PAM50')))
+  estimations <- estimations %>% filter(!(feature %in% c(grep('Fibroblasts|Myofibroblasts', estimations$feature,value=T))))
+  
+  estimations <- estimations %>% arrange(desc(estimation_count)) %>% mutate(rank = row_number()) %>% mutate(rank_percentage = 100* (rank / nrow(estimations)))
+  
+  return(estimations)
+}
+
+
+```
+
+
+## Original Classification
+
+```{r}
+cellPhenotypes <- getCellProportionsPerImage()
+density_matrix <- generate_matrix(cellPhenotypes, 'ImageNumber')
+
+PCAofSubset <- function(type, imageNumbers){
+  density_matrix <- density_matrix[row.names(density_matrix) %in% imageNumbers,]
+  
+  estimations <- computeEstimationPercentages(getShapeFeatures()[row.names(getShapeFeatures()) %in% imageNumbers,])
+  dominant_combinations_shape <- estimations %>% filter(rank_percentage < 50) %>% pull(feature)
+  dominant_combinations_scale <- estimations %>% filter(rank_percentage < 50) %>% pull(feature)
+  shape_features <- getShapeFeatures() %>% select(c('tnumber', dominant_combinations_shape)) %>% rename_with(~paste(., '_shape',sep=''))
+  scale_features <- getScaleFeatures() %>% select(c('tnumber', dominant_combinations_scale)) %>% rename_with(~paste(., '_scale',sep=''))
+  distance_features <- merge(shape_features,scale_features, by.x='tnumber_shape', by.y='tnumber_scale')
+  distance_matrix <- generate_matrix(distance_features,'tnumber_shape')
+  distance_matrix <- distance_matrix[row.names(distance_matrix) %in% imageNumbers,]
+  
+  plot_pca(density_matrix  %>% select(-c('isTumour')) %>% rename_with(~str_remove(., '_CPh')) %>% filter(!(row.names(density_matrix) %in% getNonTumourImages())), 'ER_HER2_status')
+  ggsave(paste(here('output/Method_comparison/heatmaps/subtypeRegion_heatmaps/pca_density_'), type, '.pdf',sep=''),width=8,height=7)
+
+  plot_pca(distance_matrix %>% filter(!(row.names(distance_matrix) %in% getNonTumourImages())), "ER_HER2_status")
+  ggsave(paste(here('output/Method_comparison/heatmaps/subtypeRegion_heatmaps/pca_shapeAndScale_'), type, '.pdf',sep=''),width=8,height=7)
+}
+
+cellCounts <- merge(getDensityFeatures(), clinical_data %>% select(c(ImageNumber, PAM50, ER_HER2_status)), by='ImageNumber')
+HER2_images <- cellCounts %>% filter(PAM50 == 'HER2') %>% filter(`HER2^{+}` > 20) %>% pull(ImageNumber)
+Basal_images <- cellCounts %>% filter(PAM50 == 'Basal') %>% filter(`Basal` > 20) %>% pull(ImageNumber)
+# CD15_images <- cellCounts %>% filter(`CD15^{+}` > 20) %>% pull(ImageNumber)
+ERHighCK_images <- cellCounts %>% filter(PAM50 == 'Luminal A') %>% filter(`CK8-18^{+} ER^{hi}` > 20) %>% pull(ImageNumber)
+ERHighCX_images <- cellCounts %>% filter(PAM50 == 'LUminal A') %>%  filter(`ER^{hi}CXCL12^{+}` > 20) %>% pull(ImageNumber)
+
+
+```
+
+## Alternative classification
+
+```{r}
+cellCountsAlternative <- getDensityFeaturesAlternative()
+CKpos_ERHer2neg_images <- cellCountsAlternative %>% filter(`CK+_ERorHER2-_cells` > 100) %>% pull(ImageNumber)
+CKpos_ERHer2pos_images <- cellCountsAlternative %>% filter(`CK+_ERorHER2+_cells` > 100) %>% pull(ImageNumber)
+CKmed_ERHer2neg_images <- cellCountsAlternative %>% filter(`CKmed_ERorHER2-_cells` > 100) %>% pull(ImageNumber)
+CKneg_images <- cellCountsAlternative %>% filter(`CK-_cells` > 100) %>% pull(ImageNumber)
+CKnegMHCpos_images <- cellCountsAlternative %>% filter(`CK-MHC+_cells` > 100) %>% pull(ImageNumber)
+
+cellPhenotypes <- getCellProportionsPerImageAlternative()
+density_matrixAlternative <- generate_matrix(cellPhenotypes, 'ImageNumber')
+
+PCAofSubsetAlternative <- function(type, imageNumbers){
+  density_matrix <- density_matrixAlternative[row.names(density_matrixAlternative) %in% imageNumbers,]
+  
+  estimations <- computeEstimationPercentages(getShapeFeaturesAlternative()[row.names(getShapeFeaturesAlternative()) %in% imageNumbers,])
+  dominant_combinations_shape <- estimations %>% filter(rank_percentage < 50) %>% pull(feature)
+  dominant_combinations_scale <- estimations %>% filter(rank_percentage < 50) %>% pull(feature)
+  shape_features <- getShapeFeaturesAlternative() %>% select(c('tnumber', dominant_combinations_shape)) %>% rename_with(~paste(., '_shape',sep=''))
+  scale_features <- getScaleFeaturesAlternative() %>% select(c('tnumber', dominant_combinations_scale)) %>% rename_with(~paste(., '_scale',sep=''))
+  distance_features <- merge(shape_features,scale_features, by.x='tnumber_shape', by.y='tnumber_scale')
+  distance_matrix <- generate_matrix(distance_features,'tnumber_shape')
+  distance_matrix <- distance_matrix[row.names(distance_matrix) %in% imageNumbers,]
+  
+  plot_pca(density_matrix  %>% select(-c('isTumour')) %>% rename_with(~str_remove(., '_CPh')) %>% filter(!(row.names(density_matrix) %in% getNonTumourImages())), 'PAM50')
+  ggsave(paste(here('output/Method_comparison/heatmaps/subtypeRegion_heatmaps/pca_density_'), type, '_alternative.pdf',sep=''),width=8,height=7)
+
+  plot_pca(distance_matrix %>% filter(!(row.names(distance_matrix) %in% getNonTumourImages())), "PAM50")
+  ggsave(paste(here('output/Method_comparison/heatmaps/subtypeRegion_heatmaps/pca_shapeAndScale_'), type, '_alternative.pdf',sep=''),width=8,height=7)
+}
+
+PCAofSubsetAlternative('CKpos_ERHer2neg', CKpos_ERHer2neg_images)
+# PCAofSubsetAlternative('CKpos_ERHer2pos', CKpos_ERHer2pos_images)
+# PCAofSubsetAlternative('CKmeds_ERHer2neg', CKmed_ERHer2neg_images)
+# PCAofSubsetAlternative('CKneg', CKneg_images)
+# PCAofSubsetAlternative('CKnegMHCpos', CKnegMHCpos_images)
+
+
+```
+
+

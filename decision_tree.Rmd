@@ -1,0 +1,44 @@
+---
+title: "decision_tree"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rpart)
+library(rpart.plot)
+library(tidyverse)
+library(here)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(caret)
+
+clinical_data <- getClinical()
+```
+
+```{r}
+cellPhenotypes <- getCellProportionsPerImageAlternative()
+density_matrixAlternative <- generate_matrix(cellPhenotypes, 'ImageNumber') %>% rename_with(~str_remove(., '_CPh'))
+density_matrixAlternative <- density_matrixAlternative %>% mutate(ImageNumber = row.names(density_matrixAlternative))
+density_matrixAlternative <- merge(density_matrixAlternative, clinical_data %>% select(c(ImageNumber, ER_HER2_status)), by='ImageNumber', all.x=T)
+density_matrixAlternative <- density_matrixAlternative %>% drop_na()
+density_matrixAlternative <- density_matrixAlternative %>% mutate(ER_HER2_status = factor(ER_HER2_status, levels = c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+"))) 
+```
+
+```{r}
+train.index <- createDataPartition(density_matrixAlternative$ER_HER2_status, p = .7, list = FALSE)
+train <- density_matrixAlternative[ train.index,]
+test  <- density_matrixAlternative[-train.index,]
+
+tree <- rpart(ER_HER2_status ~., data = train, method = "class")
+rpart.plot(tree)
+```
+```{r}
+table(test$ER_HER2_status, predict(tree,test, type = "class"))
+```
+

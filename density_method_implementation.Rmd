@@ -12,22 +12,28 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Compute density features
 
 ```{r}
-library(tidyverse)
+# library(tidyverse)
 library(ggplot2)
 library(data.table)
 library(here)
 library(fst)
 source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(dplyr)
 
-cells <- getCells()
+#  Choose original or alternative classification
+# cells <- getCells()
+# cells <- getCellsAlternative()
+cells <- readRDS(here('DATA/splittedCells_vascularStroma.rds')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
+cells <- as.data.table(cells)
 
+# cells <- cells %>% mutate(is_epithelial = ifelse(meta_description == "Ki67+_cells", FALSE, is_epithelial))
 ```
 
 ## Cell type densities
 Generate absolute count matrix for each image.
 
 ```{r}
-
 cell_counts <- as_tibble(cells) %>% select(c(ImageNumber,metabric_id, meta_description)) %>%
                 dplyr::count(ImageNumber, meta_description)
 
@@ -37,7 +43,7 @@ cell_occurences_matrix <- reshape2::dcast(cell_occurences, ImageNumber ~ meta_de
 istumour_labels <- (unique(cells %>% select(ImageNumber, isTumour)))
 cell_occurences_matrix <- merge(cell_occurences_matrix, istumour_labels, by='ImageNumber')
 
-saveRDS(cell_occurences_matrix, file= here('scratch/features/cell_counts_per_image.rds'))
+saveRDS(cell_occurences_matrix, file= here('scratch/features/cell_counts_per_imageAlternative.rds'))
 
 ```
 
@@ -69,17 +75,17 @@ mkProportionBy(
 	byvars = c(ptCellVars, 'is_epithelial'),
 	dt = cells, suffix = 'isEpi')
 
-cells[, is_vascular := (Parent_vessel != 0)]
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
-	dt = cells, suffix = 'isVesselByEpi')
-
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
-	dt = cells, suffix = 'isInterfaceByEpi')
+# cells[, is_vascular := (Parent_vessel != 0)]
+# mkProportionBy(
+# 	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
+# 	dt = cells, suffix = 'isVesselByEpi')
+# 
+# mkProportionBy(
+# 	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
+# 	dt = cells, suffix = 'isInterfaceByEpi')
 
 proportionVars <- grep('proportion_', names(cells), value = T)
-phenotypeVars <- grep('meta_|phenotype|colours', names(cells), value = T)
+phenotypeVars <- grep('meta_description|phenotype|colours', names(cells), value = T)
 indicatorVars <- grep('^is_', names(cells), value = T)
 indicatorVars <- setdiff(indicatorVars, c('is_normal', 'is_dcis'))
 
@@ -92,17 +98,17 @@ proportionsOut <- melt(proportionsOut,
 	variable = 'type'
 	)	
 proportionsOut[, type := gsub('proportion_', '', type)]
-proportionsOut[type == 'isEpi', 
+proportionsOut[type == 'isEpi',
 	type := ifelse(is_epithelial, 'tumour', 'stroma')]
-proportionsOut[type == 'isVesselByEpi', 
-	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
-proportionsOut[type == 'isInterfaceByEpi', 
-	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
-proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
-proportionsOut[, type := gsub('ByEpi', '', type)]
-proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
-	newSuffix := NULL]
-proportionsOut <- proportionsOut[, .SD[1], by = .(ImageNumber, meta_id, type)]
+# proportionsOut[type == 'isVesselByEpi',
+# type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
+# proportionsOut[type == 'isInterfaceByEpi',
+# type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
+# proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
+# proportionsOut[, type := gsub('ByEpi', '', type)]
+# proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
+# newSuffix := NULL]
+proportionsOut <- proportionsOut[, .SD[1], by = .(ImageNumber, meta_description, type)]
 proportionsOut[, type := gsub(' ', '', type)]
 
 proportionsOut[, check := sum(proportion), by = .(ImageNumber, type)]
@@ -111,7 +117,8 @@ proportionsOut[, check := NULL]
 
 cellPhenotypes <- proportionsOut
 
-cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+# cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[grep('all', type)]
 cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
 allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
 setnames(allCombinations, c('ImageNumber', 'meta_description'))
@@ -129,9 +136,10 @@ cellPhenotypes <- cellPhenotypes[checkBothCompartments > 0][, checkBothCompartme
 cellPhenotypes <- dcast(cellPhenotypes, ImageNumber ~ meta_description, value.var = 'proportion')
 # cellPhenotypes <- na.omit(cellPhenotypes) # samples that contain both tumour and stromal cells
 
+istumour_labels <- (unique(cells %>% dplyr::select(ImageNumber, isTumour)))
 cellPhenotypes <- merge(cellPhenotypes,istumour_labels, by='ImageNumber')
 
-saveRDS(cellPhenotypes, file=here('scratch/features/cell_proportions_per_image.rds'))
+saveRDS(cellPhenotypes, file=here('scratch/features/regions/cell_proportions_per_imageVS.rds'))
 
 ```
 
@@ -187,15 +195,15 @@ proportionsOut <- melt(proportionsOut,
 proportionsOut[, type := gsub('proportion_', '', type)]
 proportionsOut[type == 'isEpi', 
 	type := ifelse(is_epithelial, 'tumour', 'stroma')]
-proportionsOut[type == 'isVesselByEpi', 
-	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
-proportionsOut[type == 'isInterfaceByEpi', 
-	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
-proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
-proportionsOut[, type := gsub('ByEpi', '', type)]
-proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
-	newSuffix := NULL]
-proportionsOut <- proportionsOut[, .SD[1], by = .(metabric_id, meta_id, type)]
+# proportionsOut[type == 'isVesselByEpi', 
+# 	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
+# proportionsOut[type == 'isInterfaceByEpi', 
+# 	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
+# proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
+# proportionsOut[, type := gsub('ByEpi', '', type)]
+# proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
+# 	newSuffix := NULL]
+proportionsOut <- proportionsOut[, .SD[1], by = .(metabric_id, meta_description, type)]
 proportionsOut[, type := gsub(' ', '', type)]
 
 proportionsOut[, check := sum(proportion), by = .(metabric_id, type)]
@@ -228,3 +236,31 @@ cellPhenotypes <- merge(cellPhenotypes,istumour_labels, by='metabric_id')
 saveRDS(cellPhenotypes, file=here('scratch/features/cell_proportions_per_patient.rds'))
 
 ```
+
+```{r}
+cells <- cells %>% select(c(ImageNumber, meta_description, is_epithelial ))
+
+mkProportionBy <- function(byvars, dt, suffix){
+
+	countsBy <- byvars
+	totalsBy <- setdiff(byvars, 'meta_description')
+	outVar <- paste0('proportion_',suffix)
+
+	dt[, counts := .N, by = byvars]
+	dt[, totals := .N, by = totalsBy]
+	dt[, eval(outVar) := (counts / totals)]
+	dt[, eval(c('counts', 'totals')) := NULL]
+	return(dt)
+}
+
+ptCellVars <- c('ImageNumber', 'meta_description') 
+proportions <- mkProportionBy(byvars = ptCellVars,dt = cells, suffix = 'all')
+
+proportions <- mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial'),
+	dt = proportions, suffix = 'isEpi')
+
+t <- proportions %>% group_by(ImageNumber) %>% summarise(s = sum(proportion_all))
+
+```
+

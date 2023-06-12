@@ -27,6 +27,7 @@ library(ggpubr)
 library(gtools)
 source(here("UtilityFunctions.R"))
 source(here('MEP_UtilityFunctions.R'))
+source(here('logisticRegression_methods.R'))
 library('glmnet', quiet = T)
 library(glmnetUtils)
 library('ROCR', quiet = T)
@@ -41,57 +42,69 @@ projectSeed <- 89230689
 set.seed(projectSeed)
 
 outDir <- here('scratch')
-cells <- getCells()
+cells <- getCellsAlternative()
 structures <- getStructures()
 TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
 ptLevelTMEinteractions <- read_fst(here('scratch/ptLeveLTMEInteractions.fst'), as.data.table=T)
 NetworkProperties <- readRDS(here('scratch/NetworkProperties.rds'))
 clinical_data <- getClinical()
-
+init_predictors <- predictorInitialFile()
+# colnames(init_predictors) <- gsub("[^A-Za-z0-9+\\-]", "", colnames(init_predictors))
 
 ```
 
 The training dataset increases in size because the shape and scale parameters are computed per image instead of per patient. It also considers tissues with only tumor or only TME cells. These images are removed in the originial prediction experiment.
 
-Calculate TME structures, proportions and network properties per slide instead of sample
+Calculate TME structures, proportions and network properties per slide instead of sample.
 
 ```{r}
-# Structures
-TMEStructures <- here('scratch/ptLeveLTMEInteractions.fst')
-TMEStructures <- read_fst(TMEStructures, as.data.table = T)
-IDs <- getCells()[, .(ImageNumber, isDiscovery)]
-IDs <- IDs[, .SD[1], by = ImageNumber]
-TMEStructures <- merge(x = TMEStructures, y = IDs, by = 'ImageNumber') 
-TMEStructures[, isTestCohort := ifelse(isDiscovery, 'train', 'test')]
-setnames(TMEStructures, 
-	c('nInteractionsPerStructure', 'TotalInteractions'),
-	c('module_count', 'total_communities'))
-TMEStructures[, proportion := module_count / total_communities]
-TMEStructures[, proportion := gtools::logit(ifelse(proportion == 1, proportion - 1e-6, proportion + 1e-6))]
-structures <- getStructures()
-predictors <- TMEStructures[, .(ImageNumber, TMEStructure, proportion, total_communities, isTestCohort)]
-predictors[, weights := sum(unique(total_communities)), by = ImageNumber]
-predictors[, total_communities := NULL]
-predictors <- dcast(predictors, ImageNumber + weights + isTestCohort ~ TMEStructure, value.var = 'proportion')
-oldNames <- grep('ImageNumber|weights|isTestCohort', names(predictors), invert = TRUE, value = TRUE)
-newNames <- paste0('TMEStructure', oldNames)
-setnames(predictors, oldNames, newNames)
-	
-# Network properties
+TMEStructurePredictors <- c("TMEStructure1", "TMEStructure2", "TMEStructure3", "TMEStructure4", "TMEStructure5", "TMEStructure6", "TMEStructure7", "TMEStructure8", "TMEStructure9", "TMEStructure10")
+
+cellPhenotypes <- here('scratch/cellPhenotypeProportionsAlternative.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+                         y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+                         by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+                        by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+# cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
+cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+
+cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+                         y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+                         by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+                        by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+cellPhenotypes[, meta_description := gsub("[^A-Za-z0-9+\\-]", "", meta_description)]
+cellPhenotypes[, meta_description := paste0(meta_description, '_originalType')]
+cPh_tumour_original <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme_original <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+
 nwP <- here('scratch/NetworkProperties.rds')
 nwP <- read_rds(nwP)
 standardiseNwP <- function(name){
-	dt <- nwP[[name]]
-	setnames(dt, grep('communities_', names(dt), value = TRUE), 'communityID')
-	dt[, type := name]
-	return(dt)
+  dt <- nwP[[name]]
+  setnames(dt, grep('communities_', names(dt), value = TRUE), 'communityID')
+  dt[, type := name]
+  return(dt)
 }
 nwP <- rbindlist(lapply(c('stroma', 'tumour'), standardiseNwP))
 IDs <- getCells()[, .(ImageNumber, metabric_id)][, .SD[1], by = ImageNumber]
 nwP <- merge(x = nwP, y = IDs, by = 'ImageNumber') 
 nwP[, assortativity := NULL] #has NAs
 measureVars <- grep('ImageNumber|communityID|type|metabric_id', names(nwP), 
-	invert = TRUE, value = TRUE)
+                    invert = TRUE, value = TRUE)
 PtmeasureVars <- paste0(measureVars, 'PtMean')
 nwP[, eval(PtmeasureVars) := lapply(.SD, mean), by = .(type, ImageNumber), .SDcols = measureVars]
 nwP <- nwP[, .SD[1], by = .(type, ImageNumber)]
@@ -102,361 +115,75 @@ nwP <- dcast(nwP, ImageNumber ~ variable)
 nwP <- na.omit(nwP)
 nwPredictorsTumour <- grep('_tumour', names(nwP), invert = F, value = T)
 nwPredictorsTME <- grep('_stroma', names(nwP), invert = F, value = T)
-predictors <- merge(x = predictors, y = nwP, by = 'ImageNumber') 
 
-cells <- getCells()[(isTumour)]
-
-# Compute proportions: all, tumour, stroma, vascular, interface
-mkProportionBy <- function(byvars, dt, suffix){
-
-	countsBy <- byvars
-	totalsBy <- setdiff(byvars, 'meta_description')
-	outVar <- paste0('proportion_',suffix)
-
-	dt[, counts := .N, by = byvars]
-	dt[, totals := .N, by = totalsBy]
-	dt[, eval(outVar) := (counts / totals)]
-	dt[, eval(c('counts', 'totals')) := NULL]
-	return(dt)
-}
-
-ptCellVars <- c('ImageNumber', 'meta_description') 
-mkProportionBy(byvars = ptCellVars,dt = cells, suffix = 'all')
-
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial'),
-	dt = cells, suffix = 'isEpi')
-
-cells[, is_vascular := (Parent_vessel != 0)]
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
-	dt = cells, suffix = 'isVesselByEpi')
-
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
-	dt = cells, suffix = 'isInterfaceByEpi')
-
-proportionVars <- grep('proportion_', names(cells), value = T)
-phenotypeVars <- grep('meta_|phenotype|colours', names(cells), value = T)
-indicatorVars <- grep('^is_', names(cells), value = T)
-indicatorVars <- setdiff(indicatorVars, c('is_normal', 'is_dcis'))
-
-toKeep <- c(ptCellVars, proportionVars, phenotypeVars, indicatorVars)
-proportionsOut <- cells[, .SD, .SDcols = toKeep]
-proportionsOut <- melt(proportionsOut,
-	id.vars = c('ImageNumber', phenotypeVars, indicatorVars),
-	measure.vars = proportionVars,
-	value = 'proportion',
-	variable = 'type'
-	)	
-proportionsOut[, type := gsub('proportion_', '', type)]
-proportionsOut[type == 'isEpi', 
-	type := ifelse(is_epithelial, 'tumour', 'stroma')]
-proportionsOut[type == 'isVesselByEpi', 
-	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
-proportionsOut[type == 'isInterfaceByEpi', 
-	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
-proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
-proportionsOut[, type := gsub('ByEpi', '', type)]
-proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
-	newSuffix := NULL]
-proportionsOut <- proportionsOut[, .SD[1], by = .(ImageNumber, meta_id, type)]
-proportionsOut[, type := gsub(' ', '', type)]
-
-proportionsOut[, check := sum(proportion), by = .(ImageNumber, type)]
-stopifnot(all.equal(rep(1, nrow(proportionsOut)), proportionsOut[['check']]))
-proportionsOut[, check := NULL]
-
-outfile <- here('scratch/cellPhenotypeProportions.fst')
-write_fst(proportionsOut, outfile)
-
-# Cell phenotype proportions
-cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
-cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
-cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
-cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
-allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
-setnames(allCombinations, c('ImageNumber', 'meta_description'))
-allCombinations <- merge(x = allCombinations, 
-   y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
-   by = 'meta_description') 
-cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
-   by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
-cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
-cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
-cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
-cellPhenotypes[is.na(proportion), proportion := 0]
-cellPhenotypes[, checkBothCompartments := sum(proportion), by = .(ImageNumber, type)]
-cellPhenotypes <- cellPhenotypes[checkBothCompartments > 0][, checkBothCompartments := NULL]
-cellPhenotypes <- dcast(cellPhenotypes, ImageNumber ~ meta_description, value.var = 'proportion')
-cellPhenotypes <- na.omit(cellPhenotypes) # samples that contain both tumour and stromal cells
-predictors <- merge(x = predictors, y = cellPhenotypes, by = 'ImageNumber')
-saveRDS(predictors, file = here('scratch/predictors_intfile.rds'))
+rm(nwP, cellPhenotypes)
 
 ```
-
-```{r}
-apply_filtering <- function(percentage){
-  predictors <- read_rds(here('scratch/predictors_intfile.rds'))
-
-  generate_matrix<- function(df, subselection=NULL, NA_percentage=0){
-    m <- as.data.frame(df)
-    rownames(m) <- m$tnumber
-    m <- m[,-c(1)]
-    # filtering: with percentages`
-    m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
-    # Impute NANs before or after scaling?
-    # m <- m %>% mutate_all(~ifelse(is.na(.x), mean(.x, na.rm = TRUE), .x))
-    
-    if (!is.null(subselection)){
-      m <- m %>% select(all_of(subselection))
-    }
-    
-    m <- scale(m)
-    m <- replace(m,is.na(m),0)
-    
-    m <- as.data.frame(m)
-  
-    return(m)
-  }
-  
-  shape_features <- getShapeFeatures()
-  scale_features <- getScaleFeatures()
-  estimations <- read_rds(here('scratch/estimationCounts.rds'))
-  select_features <- rownames(estimations %>% filter(rank_percentage <= percentage))
-  
-  
-  shape_features <- generate_matrix(shape_features,select_features, 0)
-  scale_features <- generate_matrix(scale_features,select_features, 0)
-  print(ncol(shape_features))
-
-  shape_features$ImageNumber <- rownames(shape_features)
-  scale_features$ImageNumber <- rownames(scale_features)
-  
-  shapePredictors <- setdiff(colnames(shape_features), c('metabric_id', 'ImageNumber'))
-  scalePredictors <- setdiff(colnames(scale_features), c('metabric_id', 'ImageNumber'))
-  
-  shape_features <- shape_features %>%
-    rename_with( .fn = function(.x){paste0("shape_", .x)},
-                 .cols=all_of(shapePredictors))
-  
-  scale_features <- scale_features %>%
-    rename_with( .fn = function(.x){paste0("scale_", .x)},
-                 .cols=all_of(scalePredictors))
-  
-  shapePredictors <- setdiff(colnames(shape_features), c('metabric_id', 'ImageNumber'))
-  scalePredictors <- setdiff(colnames(scale_features), c('metabric_id', 'ImageNumber'))
-  
-  shape_and_scale <- merge(shape_features, scale_features, by=c('ImageNumber'))
-  shape_and_scale$ImageNumber = as.numeric(shape_and_scale$ImageNumber)
-  
-  predictors <- merge(x = predictors, y = shape_and_scale, by = 'ImageNumber')
-
-  # Response intclusts
-  intClust <- as.data.table(clinical_data)[, .(ImageNumber, IntClust)]
-  intClust <- intClust[!is.na(IntClust)]
-  for(i in sortunique(intClust$IntClust)) intClust[, eval(i) := as.numeric(IntClust == i)]
-  intClust[, IntClust := NULL]
-  
-  # Response PAM groups
-  PAM50 <- as.data.table(clinical_data)[, .(ImageNumber, PAM50)]
-  PAM50 <- PAM50[!is.na(PAM50)]
-  for(i in sortunique(PAM50$PAM50)) PAM50[, eval(i) := as.numeric(PAM50 == i)]
-  PAM50[, PAM50 := NULL]
-  
-  toModel <- merge(x = predictors, y = intClust, by = 'ImageNumber', all.x = T)
-  toModel <- merge(x = toModel, y = PAM50, by = 'ImageNumber', all.x = T)
-  # saveRDS(predictors, file=here('scratch/model_input.rds'))
-  
-  return(toModel)
-}
-```
-
-
-```{r}
-getPredictorName <- function(predictors){
-    	predictor_name = 'unknown'
-  	
-  	if (length(setdiff(predictors, cPh_tme))==0){
-  	  predictor_name = 'TME_proportion'
-  	}
-  	  	if (length(setdiff(predictors, cPh_tumour))==0){
-  	  predictor_name = 'tumour_proportion'
-  	  	}
-  	  	if (length(setdiff(predictors, TMEStructurePredictors))==0){
-  	  predictor_name = 'TME_structures'
-  	  	}
-  	  	if (length(setdiff(predictors, nwPredictorsTME))==0){
-  	  predictor_name = 'TME_nw'
-  	  	}
-  	  	if (length(setdiff(predictors, nwPredictorsTumour))==0){
-  	  predictor_name = 'tumour_nw'
-  	  	}
-  	  	if (length(setdiff(predictors, shapePredictors))==0){
-  	  predictor_name = 'shape'
-  	  	}
-  	  	if (length(setdiff(predictors, scalePredictors))==0){
-  	  predictor_name = 'scale'
-  	  	}
-  	  	if (length(setdiff(c(shapePredictors, scalePredictors), predictors))==0){
-  	  predictor_name = 'shape_and_scale'
-  	  	}
-  	  	if (length(setdiff(predictors, cPh_tme))>0 & length(setdiff(predictors, cPh_tme)) < length(predictors)){
-  	  predictor_name = 'combination'
-  	  	}
-    	
-    	return(predictor_name)
-}
-
-
-fitModel <- function(response, predictors, Weights, dt){
-	dt <- dt[, .SD, .SDcols = c(response, predictors, Weights)]	
-	dt <- na.omit(dt)
-	weights <- dt[, get(Weights)]
-	response <- as.numeric(dt[, get(response)])
-	predictors <- dt[, .SD, .SDcols = predictors]
-	lassoFit <- cva.glmnet(as.matrix(predictors), as.matrix(response), weights = weights, 
-		family = 'binomial', nlambda = 100, nfolds = 10)
-	return(lassoFit)
-}
-
-getAUC <- function(
-	responseVar, # character column name
-	predictors, # character vector of column names
-	Weights, # character column name
-	testTrain # list of dts named 'train' and 'test' 
-	){
-
-	sampleSizeTrain <- testTrain$train[!is.na(get(responseVar)), .N]
-	samplePositiveTrain <- testTrain$train[get(responseVar) == 1, .N]
-
-	sampleSizeTest <- testTrain$test[!is.na(get(responseVar)), .N]
-	samplePositiveTest <- testTrain$test[get(responseVar) == 1, .N]
-
-	modelFit <- fitModel(response = responseVar, predictors = predictors, 
-		Weights = Weights, dt = testTrain$train)
-	
-  min_cvm <- min(modelFit[["modlist"]][[1]][["cvm"]])
-  a <- modelFit$alpha[1]
-  index <- 1
-  for (m in 2:length(modelFit$alpha)){
-    pot_min_cvm <- min(modelFit[["modlist"]][[m]][["cvm"]])
-    if (pot_min_cvm < min_cvm){
-      min_cvm <- pot_min_cvm
-      a <- modelFit$alpha[[m]]
-      index <- m
-    }
-  }
-  predictor_name <- getPredictorName(predictors)
-  
-  coefList <- coef(modelFit[['modlist']][[index]], s = "lambda.min")
-  coefList <- data.frame(coefList@Dimnames[[1]][coefList@i+1],coefList@x)
-  names(coefList) <- c('var','val')
-  coefList <- coefList %>% mutate(response = responseVar)
-  coefList <- coefList %>% mutate(predictor = predictor_name)
-
-	# Save files during final prediction
-  save_rds_archive(coefList, file=paste(here('scratch/coeflists/coefList_'), responseVar, '_', predictor_name, '.rds', sep=''), last_modified = T, with_time = T)
-
-	testDt <- testTrain$test[, .SD, .SDcols = c(responseVar, predictors)]
-
-	testDt <- na.omit(testDt)
-	testMat <- as.matrix(testDt[, .SD, .SDcols = predictors])
-	predictions <- predict(modelFit, testMat, type = 'response', s = 'lambda.min',alpha=a)
-	trueLabels <- as.numeric(testDt[, get(responseVar)])
-	predictObj <- prediction(predictions, trueLabels)
-	auc <- performance(predictObj,"auc") 
-	auc <- as.numeric(auc@y.values)
-	roc <- pROC::roc(response = trueLabels, predictor = predictions, direction= "<")
-
-	# Save files during filtering iterations
-	# save_rds_archive(roc, file= paste(here('scratch/ROCS/'),predictor_name ,'/roc_filter',length(predictors), '_' ,responseVar, '_', predictor_name, '.rds', sep=''), last_modified = T, with_time = T)
-
-	# Save files during test/train cross-validation
-		# save_rds_archive(roc, file= paste(here('scratch/ROCS/roc_'),responseVar, '_', predictor_name, '.rds', sep=''), last_modified = T, with_time = T)
-
-	# Save files during final prediction
-	saveRDS(roc, file= paste(here('scratch/ROCS/roc_'),responseVar, '_', predictor_name, '.rds', sep=''))
-
-	return(data.table(
-		sampleSizeTrain = sampleSizeTrain, samplePositiveTrain = samplePositiveTrain,
-		sampleSizeTest = sampleSizeTest, samplePositiveTest = samplePositiveTest,
-		response = responseVar, auc = auc, alpha = a))
-}
-
-
-mkAUCsTable <- function(Rep, predictors, toModel){
-	mkAUC <- function(responseVar, predictors, Weights, testTrain){
-		tryCatch(
-			expr = {getAUC(responseVar, predictors, Weights, testTrain)},
-			error = function(e){return(e)}
-			)
-	}
-
-	AUCs <- rbindlist(mclapply(responseVars, mkAUC, predictors = predictors, Weights = 'weights', testTrain = toModel, mc.cores = 12))
-	AUCs[, rep := Rep]
-	return(AUCs)
-}
-
-
-# Fit modeltypes
-fitAndEstimate <- function(selection_predictors, name_predictors, outfile, df){
-  RNGkind("L'Ecuyer-CMRG")
-  mc.reset.stream()
-  doAUCs <- function(predictors){
-  	Reps <- seq_len(1)
-  	AUCs <- rbindlist(lapply(Reps, mkAUCsTable, predictors = predictors, toModel=df))
-  	return(AUCs)
-  }
-  
-  AUCs<- lapply(selection_predictors, doAUCs)
-  names(AUCs) <- name_predictors
-  
-  modeltypes <- seq_len(length(AUCs))
-  names(modeltypes) <- names(AUCs)
-  AUCs <- rbindlist(lapply(names(AUCs), function(name){AUCs[[name]][, type := name]}))
-  
-  AUCs[, facet_by := modeltypes[type]]
-  AUCs[, facet_by := factor(facet_by, 
-  	levels = modeltypes, labels = names(modeltypes), ordered = TRUE)]
-  write_fst(AUCs, outfile)
-
-}
-
-TMEStructurePredictors <- grep('TMEStructure[0-9]*', names(predictors), value = TRUE)
-```
-
 
 Test different filters.
 
 ```{r}
-for (percentage in seq(100,5,-5)){
-  toModel <- apply_filtering(percentage)
-  toModel <- split(toModel, by = 'isTestCohort')
-  responseVars <- grep('IntClust', names(toModel$train), value = T)
-  responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
-  
-  shapePredictors <- grep('shape', names(toModel$train), value = T)
-  scalePredictors <- grep('scale', names(toModel$train), value = T)
-  distPredictors <- grep('shape|scale', names(toModel$train), value = T)
-  AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,cPh_tumour, cPh_tme)
-  distance_predictors <- list(shapePredictors,scalePredictors,distPredictors)
-  
-  name_distance_predictors <-  c('Shape features','Scale features','Shape and scale features')
-  outputfile = paste(here('scratch/glmnetAUCs_'),percentage, 'filter_crossvalidation.fst',sep='')
+toModel <- apply_filtering(init_predictors, 100)
+#use 70% of dataset as training set and 30% as test set
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$PAM50, k = 5)
 
-  fitAndEstimate(distance_predictors,name_distance_predictors, outfile = outputfile, df= toModel)
+for (percentage in seq(100,5,-5)){
+  for (i in 1:length(folds)){
+    train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+    
+    toModel <- apply_filtering(init_predictors, percentage)
+    toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+    toModel <- split(toModel, by = 'isTestCohort')
+
+    shapePredictors <- grep('shape', names(toModel$train), value = T)
+    scalePredictors <- grep('scale', names(toModel$train), value = T)
+    distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+    distance_predictors <- list(shapePredictors,scalePredictors,distPredictors)
+    name_distance_predictors <-  c('Shape features','Scale features','Shape and scale features')
+    
+    responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+    outputfile = paste(here('scratch/glmnetAUCs_PAM_'),percentage, 'filter_test',i , '.fst',sep='')
+    fitAndEstimate(distance_predictors,name_distance_predictors, outfile = outputfile, df= toModel)
+    
+  }
+}
+
+
+toModel <- apply_filtering(init_predictors, 100)
+#use 70% of dataset as training set and 30% as test set
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$ER_HER2_status, k = 5)
+
+for (percentage in seq(100,5,-5)){
+  for (i in 1:length(folds)){
+    train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+    
+    toModel <- apply_filtering(init_predictors, percentage)
+    toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+    toModel <- split(toModel, by = 'isTestCohort')
+
+    shapePredictors <- grep('shape', names(toModel$train), value = T)
+    scalePredictors <- grep('scale', names(toModel$train), value = T)
+    distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+    distance_predictors <- list(shapePredictors,scalePredictors,distPredictors)
+    name_distance_predictors <-  c('Shape features','Scale features','Shape and scale features')
+    
+    responseVars <- c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+")
+    outputfile = paste(here('scratch/glmnetAUCs_MS_'),percentage, 'filter_test',i , '.fst',sep='')
+    fitAndEstimate(distance_predictors,name_distance_predictors, outfile = outputfile, df= toModel)
+    
+  }
 }
 
 ```
-Rerun the experiments with cross-validation on test set.
+
+Rerun the experiments with cross-validation for all other feature sets.
 
 ```{r}
-#Non distance feature sets
-all_predictors <- list(cPh_tumour, cPh_tme, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME)
-name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures','Network properties (Tumour)', 'Network properties (TME)')
+filtering_percentage <- 100
 
-toModel <- apply_filtering(100)
+toModel <- apply_filtering(init_predictors, filtering_percentage)
 #use 70% of dataset as training set and 30% as test set
 toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
 folds <- create_folds(toModel_clinical$PAM50, k = 5)
@@ -464,309 +191,169 @@ folds <- create_folds(toModel_clinical$PAM50, k = 5)
 for (i in 1:length(folds)){
   train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
   
-  toModel <- apply_filtering(100)
+  toModel <- apply_filtering(init_predictors, 100)
   toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
   toModel <- split(toModel, by = 'isTestCohort')
-  
-  print(nrow(toModel$train))
-  print(nrow(toModel$test))
-  
-  responseVars <- grep('IntClust', names(toModel$train), value = T)
-  responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
+
   shapePredictors <- grep('shape', names(toModel$train), value = T)
   scalePredictors <- grep('scale', names(toModel$train), value = T)
   distPredictors <- grep('shape|scale', names(toModel$train), value = T)
-  AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,cPh_tumour, cPh_tme)
-  
-  outputfile = paste(here('scratch/glmnetAUCs_nondistance_crossvalidation_test'), i, '.fst', sep='')
+  AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
+  all_predictors <- list(cPh_tumour, cPh_tme, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME, shapePredictors, scalePredictors, distPredictors, AllPredictors)
+name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures','Network properties (Tumour)', 'Network properties (TME)','Shape features','Scale features','Shape and scale features', 'Combined')
+ 
+  responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+  outputfile = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_lasso_test'), i, '.fst', sep='')
   
   fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
   
 }
+
+toModel <- apply_filtering(init_predictors, filtering_percentage)
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$ER_HER2_status, k = 5)
+
+for (i in 1:length(folds)){
+  train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+  
+  toModel <- apply_filtering(init_predictors, 100)
+  toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+  toModel <- split(toModel, by = 'isTestCohort')
+  
+  shapePredictors <- grep('shape', names(toModel$train), value = T)
+  scalePredictors <- grep('scale', names(toModel$train), value = T)
+  distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+  AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
+  all_predictors <- list(cPh_tumour, cPh_tme, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME, shapePredictors, scalePredictors, distPredictors, AllPredictors)
+name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures','Network properties (Tumour)', 'Network properties (TME)','Shape features','Scale features','Shape and scale features', 'Combined')
+  
+  responseVars <- c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+")
+  outputfile = paste(here('scratch/glmnetAUCs_MS_crossvalidation_test'), i, '.fst', sep='')
+  
+  fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
+}
+
 ```
-
+Also predict based on original cell type density features.
 ```{r}
-# Distance feature sets
-filtering_percentage = 10
+source(here('logisticRegression_methods.R'))
 
-toModel <- apply_filtering(filtering_percentage)
+filtering_percentage <- 100
+
+toModel <- apply_filtering(init_predictors, filtering_percentage)
+#use 70% of dataset as training set and 30% as test set
 toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
 folds <- create_folds(toModel_clinical$PAM50, k = 5)
 
 for (i in 1:length(folds)){
   train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
   
-  toModel <- apply_filtering(filtering_percentage)
+  toModel <- apply_filtering(init_predictors, 100)
+  toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+  toModel <- split(toModel, by = 'isTestCohort')
+  shapePredictors <- grep('shape', names(toModel$train), value = T)
+  scalePredictors <- grep('scale', names(toModel$train), value = T)
+
+  all_predictors <- list(cPh_tumour_original, cPh_tme_original)
+  name_predictors <-  c('Original cell phenotype (Tumour)', 'Original cell phenotype (TME)')
+ 
+  responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+  outputfile = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_original_test'), i, '.fst', sep='')
+  
+  fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
+  
+}
+
+toModel <- apply_filtering(init_predictors, filtering_percentage)
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$ER_HER2_status, k = 5)
+
+for (i in 1:length(folds)){
+  train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+  
+  toModel <- apply_filtering(init_predictors, 100)
   toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
   toModel <- split(toModel, by = 'isTestCohort')
   
-  print(nrow(toModel$train))
-  print(nrow(toModel$test))
+  all_predictors <- list(cPh_tumour_original, cPh_tme_original)
+  name_predictors <-  c('Original cell phenotype (Tumour)', 'Original cell phenotype (TME)')
+
+  responseVars <- c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+")
+  outputfile = paste(here('scratch/glmnetAUCs_MS_crossvalidation_original_test'), i, '.fst', sep='')
   
-  responseVars <- grep('IntClust', names(toModel$train), value = T)
-  responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
-  shapePredictors <- grep('shape', names(toModel$train), value = T)
-  scalePredictors <- grep('scale', names(toModel$train), value = T)
-  distPredictors <- grep('shape|scale', names(toModel$train), value = T)
-  AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,cPh_tumour, cPh_tme)
-  distance_predictors <- list(shapePredictors,scalePredictors,distPredictors, AllPredictors)
-  name_distance_predictors <- list('Shape features', 'Scale features', 'Shape and scale features', 'Combined')
-  
-  outputfile = paste(here('scratch/glmnetAUCs_distance10_crossvalidation'), i, '.fst', sep='')
-  
-  fitAndEstimate(distance_predictors,name_distance_predictors, outfile = outputfile, df = toModel)
-  
+  fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
 }
 ```
+
+
 
 ### Final predictions
 Rerun the experiment while saving rocs and coefficient lists.
 
 ```{r}
-toModel <- apply_filtering(10)
+toModel <- apply_filtering(init_predictors, 100)
 toModel <- split(toModel, by = 'isTestCohort')
-responseVars <- grep('IntClust', names(toModel$train), value = T)
+responseVars <- c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+")
 responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
 shapePredictors <- grep('shape', names(toModel$train), value = T)
 scalePredictors <- grep('scale', names(toModel$train), value = T)
 distPredictors <- grep('shape|scale', names(toModel$train), value = T)
-AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,cPh_tumour, cPh_tme)
+AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
 
-all_predictors <- list(cPh_tumour, cPh_tme, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,distPredictors ,AllPredictors)
-name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures',
+all_predictors <- list(cPh_tumour, cPh_tme,cPh_tumour_original,cPh_tme_original, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME, shapePredictors,scalePredictors,distPredictors ,AllPredictors)
+name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)','Original cell phenotype (Tumour)', 'Original cell phenotype (TME)', 'TME Structures',
   	'Network properties (Tumour)', 'Network properties (TME)','Shape features','Scale features','Shape and scale features', 'Combined')
 
-outputfile = here('scratch/glmnetAUCs_ALL_crossvalidation_v3.fst')
+outputfile = here('scratch/glmnetAUCs_ALL_crossvalidation_v4.fst')
 
 fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel) 
 ```
 
 ## Plot AUCs
-
-```{r}
-collect_intclust <- function(AUCs){
-  AUCs <- read_fst(AUCs, as.data.table = T)
-
-  intClustAUCs <- AUCs[grep('IntClust', response)]
-  # Plot ic10 AUCs
-  intClustCols <- getSubtypeCols()
-  intClustCols <- intClustCols$IntClust
-  intClustAUCs[, yaxis := as.numeric(gsub('IntClust ', '', response))]
-  intClustAUCs[yaxis > 4, yaxis := yaxis + 2]
-  intClustAUCs[grep('4\\+', response), yaxis := 4]
-  intClustAUCs[grep('4\\-', response), yaxis := 5]
-  intClustAUCs[grep('5\\+', response), yaxis := 6]
-  intClustAUCs[grep('5\\-', response), yaxis := 7]
-  intClustAUCs <- intClustAUCs[order(type, yaxis),]
-  
-  intClustAUCs[, yaxis := factor(yaxis, 
-  	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
-  intClustAUCs[, colours := intClustCols[response]]
-  intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
-  
-  x <- c("Cell phenotype (Tumour)","Cell phenotype (TME)","TME Structures", "Network properties (Tumour)", "Network properties (TME)","shape features","scale features", "shape and scale features",  "Combined")
-  
-  intClustAUCs <- intClustAUCs %>%
-  arrange(sapply(type, function(y) which(y == x)))
-  
-  return(intClustAUCs)
-  
-}
-
-collect_pam <- function(AUCs){
-  AUCs <- read_fst(AUCs, as.data.table = T)
-
-  intClustAUCs <- AUCs[grep('HER|Basal|Luminal|Normal', response)]
-  intClustCols <- getSubtypeCols()
-  intClustCols <- intClustCols$PAM50
-  
-  intClustAUCs[, yaxis := ifelse(response=='Basal', 1, ifelse(response=='HER2', 2,ifelse(response=='Luminal A', 3, ifelse(response=='Luminal B', 4, 5))))]
-  
-  intClustAUCs[, yaxis := factor(yaxis, 
-  	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
-  intClustAUCs[, colours := intClustCols[response]]
-  intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
-  
-  x <- c("Cell phenotype (Tumour)","Cell phenotype (TME)","TME Structures", "Network properties (Tumour)", "Network properties (TME)","shape features","scale features", "shape and scale features",  "Combined")
-  
-  intClustAUCs <- intClustAUCs %>%
-  arrange(sapply(type, function(y) which(y == x)))
-  
-  return(intClustAUCs)
-}
-
-
-generate_plot <- function(df){
-  aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-	geom_point(data = df, aes(x = auc, y = yaxis, fill=colours),alpha=1, size = 3, pch = 21) +
-  xlim(0.2,1) +
-  scale_fill_identity() +
-  scale_colour_identity() +
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position='left',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
-  
-
-  mkCountBar <- function(DaT){
-  	barCount <- ggplot(data = DaT) +
-  		geom_bar( 
-  			aes(y = samplePositiveTest, x = yaxis), 
-  			width = 0.8, stat = 'identity', fill = 'grey') +
-  		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-  			hjust = 0, nudge_y = 1) +
-  		facet_wrap(vars(facet_by)) +
-  		theme_prj() +
-  		theme(strip.text = element_blank(),
-  			plot.margin = unit(c(0,5,0,0), 'mm'),
-  			axis.line = element_blank(),
-  			axis.text = element_blank(),
-  			axis.ticks = element_blank(),
-  			axis.title.y = element_blank(),) +
-  		labs(y = bquote(italic('n')~'tumours')) +
-  		coord_flip(clip = 'off')
-  	return(barCount)	
-  }
-  
-  barCount <- mkCountBar(df[, .SD[1], by = response])
-  
-  icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(9, 0.4))
-  
-  return(icOut)
-  
-}
-
-generate_plot_alphas <- function(df){
-  aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-	geom_point(data = df, 
-		aes(x = auc, y = yaxis, fill=alpha), size = 2.5, pch = 21) +
-  scale_fill_gradient2(midpoint=0.5, low="blue", mid="white",
-                     high="red", space ="Lab", name='alpha' ) + 
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position='left',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
-  
-
-  mkCountBar <- function(DaT){
-  	barCount <- ggplot(data = DaT) +
-  		geom_bar( 
-  			aes(y = samplePositiveTest, x = yaxis), 
-  			width = 0.8, stat = 'identity', fill = 'grey') +
-  		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-  			hjust = 0, nudge_y = 1) +
-  		facet_wrap(vars(facet_by)) +
-  		theme_prj() +
-  		theme(strip.text = element_blank(),
-  			plot.margin = unit(c(0,5,0,0), 'mm'),
-  			axis.line = element_blank(),
-  			axis.text = element_blank(),
-  			axis.ticks = element_blank(),
-  			axis.title.y = element_blank(),) +
-  		labs(y = bquote(italic('n')~'tumours')) +
-  		coord_flip(clip = 'off')
-  	return(barCount)	
-  }
-  
-  barCount <- mkCountBar(df[, .SD[1], by = response])
-  
-  icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(9, 0.4))
-  
-  return(icOut)
-  
-}
-
-```
-
-
 Show effect of filtering on AUCs.
 
 ```{r}
-generate_plot_filtering <- function(df){
-  aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-	geom_point(data = df, 
-		aes(x = auc, y = yaxis, fill=colours), size = 2.5, pch=21) +
-  scale_fill_gradient2(low="white",
-                     high="black", space ="Lab", name='% features included' ) + 
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position='left',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
-  
 
-  mkCountBar <- function(DaT){
-  	barCount <- ggplot(data = DaT) +
-  		geom_bar( 
-  			aes(y = samplePositiveTest, x = yaxis), 
-  			width = 0.8, stat = 'identity', fill = 'grey') +
-  		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-  			hjust = 0, nudge_y = 1) +
-  		facet_wrap(vars(facet_by)) +
-  		theme_prj() +
-  		theme(strip.text = element_blank(),
-  			plot.margin = unit(c(0,5,0,0), 'mm'),
-  			axis.line = element_blank(),
-  			axis.text = element_blank(),
-  			axis.ticks = element_blank(),
-  			axis.title.y = element_blank(),) +
-  		labs(y = bquote(italic('n')~'tumours')) +
-  		coord_flip(clip = 'off')
-  	return(barCount)	
+MS_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+pam_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+for (s in seq(100, 5, -5)){
+  for (t in seq(1,5,1)){
+      file = paste(here('scratch/glmnetAUCs_MS_'), s, 'filter_test', t, '.fst', sep='')
+      MS_allAUCs <- rbind(MS_allAUCs, collect_MolecularSubtypes(file) %>% mutate(colours = s))
+      file = paste(here('scratch/glmnetAUCs_PAM_'), s, 'filter_test', t, '.fst', sep='')
+      pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(colours = s))
+    
   }
-  
-  barCount <- mkCountBar(df[, .SD[1], by = response])
-  
-  icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(3, 0.4))
-  
-  return(icOut)
-  
 }
 
-intclust_allAUCs <- c(collect_intclust(here('scratch/glmnetAUCs_100filter_crossvalidation.fst')) %>% mutate(colours = 100))
-pam_allAUCs <- c(collect_pam(here('scratch/glmnetAUCs_100filter_crossvalidation.fst')) %>% mutate(colours = 100))
-for (s in seq(95, 5, -5)){
-  file = paste(here('scratch/glmnetAUCs_'), s, 'filter_crossvalidation.fst', sep='')
-  intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(file) %>% mutate(colours = s))
-  pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(colours = s))
+p <- plot_grid(generate_plot_filtering(MS_allAUCs),generate_plot_filtering(pam_allAUCs), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_filtering_run2.pdf'), p, base_width = 12, base_height = 6)
 
-}
-
-p <- plot_grid(generate_plot_filtering(intclust_allAUCs),generate_plot_filtering(pam_allAUCs), ncol = 1)
-save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_filtering.pdf'), p, base_width = 12, base_height = 6)
-
-p <- plot_grid(generate_plot_alphas(intclust_allAUCs),generate_plot_alphas(pam_allAUCs), ncol = 1)
-save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCsWithAlphas_filtering.pdf'), p, base_width = 12, base_height = 6)
+p <- plot_grid(generate_plot_alphas(MS_allAUCs),generate_plot_alphas(pam_allAUCs), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCsWithAlphas_filtering_run2.pdf'), p, base_width = 12, base_height = 6)
 
 ```
 
 ```{r}
-ggplot(pam_allAUCs) + geom_line(aes(x=colours, y=auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=colours, y=auc, colour=facet_by),alpha=0.8) + facet_wrap(~fct_rev(yaxis),nrow=1)  + xlab('% of features included') + xlim(100,0) + theme_bw()
-ggsave(here('output/Method_comparison/logistic_regression/PAM_filtervsauc.pdf'),height=4, width=12)
+MS_allAUCs_means <- MS_allAUCs %>% group_by(response, type,colours,yaxis,facet_by) %>% summarise(mean_auc = mean(auc), sd_auc = sd(auc)) %>% mutate(moe =  qnorm(0.975)*sd_auc/sqrt(5))
+pam_allAUCs_means <- pam_allAUCs %>% group_by(response, type,colours,yaxis,facet_by) %>% summarise(mean_auc = mean(auc), sd_auc = sd(auc)) %>% mutate(moe =  qnorm(0.975)*sd_auc/sqrt(5))
 
-ggplot(intclust_allAUCs) + geom_line(aes(x=colours, y=auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=colours, y=auc, colour=facet_by),alpha=0.8) + facet_wrap(~fct_rev(yaxis),nrow=2)  + xlab('% of features included') + xlim(100,0) + theme_bw()
-ggsave(here('output/Method_comparison/logistic_regression/intclust_filtervsauc.pdf'),height=8, width=18)
+ggplot(pam_allAUCs_means)  +
+  # geom_ribbon(aes(x=colours, ymin=mean_auc-moe, ymax=mean_auc+moe,colour=facet_by,fill=facet_by), width=.2,position=position_dodge(0.05),alpha=0.2) +
+  geom_line(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) +
+  facet_wrap(~fct_rev(yaxis),nrow=1)  + xlab('% of features included') + xlim(100,0) + theme_bw()
+ggsave(here('output/Method_comparison/logistic_regression/PAM_filtervsauc_run2.pdf'),height=4, width=12)
+
+ggplot(MS_allAUCs_means) + 
+  # geom_ribbon(aes(x=colours, ymin=mean_auc-moe, ymax=mean_auc+sd_moe,colour=facet_by,fill=facet_by), width=.2,position=position_dodge(0.05),alpha=0.2) +
+  geom_line(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) +
+ facet_wrap(~fct_rev(yaxis),nrow=1)  + xlab('% of features included') + xlim(100,0) + theme_bw()
+ggsave(here('output/Method_comparison/logistic_regression/MS_filtervsauc_run2.pdf'),height=4, width=10)
 ```
+
+AUCs don't improve and often get worse with this type of filtering.
+The information lays in common AND rare features. We use all features with elasticnet as lasso can neglect features.
+
 
 ## AUC improvement significance
 https://www.rdocumentation.org/packages/
@@ -774,237 +361,191 @@ pROC/versions/1.18.0/topics/roc.test
 https://www.r-bloggers.com/2018/12/statistical-assessments-of-auc/
 
 ```{r}
-response_types <- c("IntClust 1", "IntClust 2", "IntClust 3","IntClust 4-", "IntClust 4+",
-           "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8",  "IntClust 9","IntClust 10",
-           "Basal", "HER2", "Luminal A", "Luminal B", "Normal-like")
-response_labels <- c("IntClust 1", "IntClust 2", "IntClust 3", "IntClust 4+","IntClust 4-",
-            "IntClust 5+", "IntClust 5-","IntClust 6",  "IntClust 7", "IntClust 8",  "IntClust 9","IntClust 10",
-           "Luminal A","Luminal B","HER2","Basal" , "Normal-like")
-
-x <- c("Shape features","Scale features")
-
-prediction_types <- c('shape', 'scale')
-convert_predictors <- tibble(name = prediction_types, df_name = x )
-
-lengths <- c(988, 938,889,839,790,741,691,642,592,543,494,444,395,345,296,247,197,148,98,49)
-percentages <- seq(100,5,-5)
-df <- tibble(filtertype = lengths, p = percentages)
-
-compare_rocs <- function(fileA, fileB){
-    roc1 <- readRDS(fileA)
-    roc2 <- readRDS(fileB)
-
-    return(pROC::roc.test(roc1, roc2, method = "bootstrap", boot.n = 500, progress = "none", paired = T))
-}
-
-filter_pvalues = data.frame(matrix(nrow=0, ncol=6,))
-for (response in response_types){
-  for (pred in prediction_types){
-        path <-  paste(here('scratch/ROCS/'),pred, '/',sep='')
-        files <- grep(paste(response,'_',sep=''),list.files(path = path),fixed=T,value=T)
-        zerofilter_file <- grep('filter988',files,fixed=T,value=T)
-        print(zerofilter_file)
-        files <- files[files != zerofilter_file]
-        for (f in 1:length(files)){
-          r1 <- compare_rocs(paste(here('scratch/ROCS/'), pred, '/', zerofilter_file,sep=''),paste(here('scratch/ROCS/'), pred, '/', files[[f]],sep=''))
-          v1 <- c(as.numeric(r1[['p.value']]), as.numeric(r1[['estimate']]), response,
-                  convert_predictors %>% filter(name == pred) %>% pull(df_name),
-                  (str_split(str_split(files[[f]], 'filter')[[1]][[2]],'_')[[1]][[1]]))
-        filter_pvalues <- rbind(filter_pvalues,v1)
-        }
-    }
-  }
-
-filter_pvalues <- setNames(filter_pvalues, c('p_value', 'AUC_nofilter', 'AUC_filter', 'response', 'type', 'filtertype'))
-filter_pvalues <- merge(filter_pvalues, df, by = 'filtertype')
-filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
-saveRDS(filter_pvalues, here('scratch/filter_pvalues.rds'))
+# response_types <- c("IntClust 1", "IntClust 2", "IntClust 3","IntClust 4-", "IntClust 4+",
+#            "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8",  "IntClust 9","IntClust 10",
+#            "Basal", "HER2", "Luminal A", "Luminal B", "Normal-like")
+# response_labels <- c("IntClust 1", "IntClust 2", "IntClust 3", "IntClust 4+","IntClust 4-",
+#             "IntClust 5+", "IntClust 5-","IntClust 6",  "IntClust 7", "IntClust 8",  "IntClust 9","IntClust 10",
+#            "Luminal A","Luminal B","HER2","Basal" , "Normal-like")
+# 
+# x <- c("Shape features","Scale features")
+# 
+# prediction_types <- c('shape', 'scale')
+# convert_predictors <- tibble(name = prediction_types, df_name = x )
+# 
+# lengths <- c(988, 938,889,839,790,741,691,642,592,543,494,444,395,345,296,247,197,148,98,49)
+# percentages <- seq(100,5,-5)
+# df <- tibble(filtertype = lengths, p = percentages)
+# 
+# compare_rocs <- function(fileA, fileB){
+#     roc1 <- readRDS(fileA)
+#     roc2 <- readRDS(fileB)
+# 
+#     return(pROC::roc.test(roc1, roc2, method = "bootstrap", boot.n = 500, progress = "none", paired = T))
+# }
+# 
+# filter_pvalues = data.frame(matrix(nrow=0, ncol=6,))
+# for (response in response_types){
+#   for (pred in prediction_types){
+#         path <-  paste(here('scratch/ROCS/'),pred, '/',sep='')
+#         files <- grep(paste(response,'_',sep=''),list.files(path = path),fixed=T,value=T)
+#         zerofilter_file <- grep('filter988',files,fixed=T,value=T)
+#         print(zerofilter_file)
+#         files <- files[files != zerofilter_file]
+#         for (f in 1:length(files)){
+#           r1 <- compare_rocs(paste(here('scratch/ROCS/'), pred, '/', zerofilter_file,sep=''),paste(here('scratch/ROCS/'), pred, '/', files[[f]],sep=''))
+#           v1 <- c(as.numeric(r1[['p.value']]), as.numeric(r1[['estimate']]), response,
+#                   convert_predictors %>% filter(name == pred) %>% pull(df_name),
+#                   (str_split(str_split(files[[f]], 'filter')[[1]][[2]],'_')[[1]][[1]]))
+#         filter_pvalues <- rbind(filter_pvalues,v1)
+#         }
+#     }
+#   }
+# 
+# filter_pvalues <- setNames(filter_pvalues, c('p_value', 'AUC_nofilter', 'AUC_filter', 'response', 'type', 'filtertype'))
+# filter_pvalues <- merge(filter_pvalues, df, by = 'filtertype')
+# filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
+# saveRDS(filter_pvalues, here('scratch/filter_pvalues.rds'))
 ```
 
 ```{r}
-filter_pvalues <- read_rds(here('scratch/filter_pvalues.rds'))
-filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
-filter_pvalues <- filter_pvalues %>% filter(type == 'Shape features')
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
-
-ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
-  ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
-  geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
-  scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
-  scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
-  xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with shape features')
- 
-ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_shape.pdf'),width=10, height=8)
-
-filter_pvalues <- read_rds(here('scratch/filter_pvalues.rds'))
-filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
-filter_pvalues <- filter_pvalues %>% filter(type == 'Scale features')
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
-
-ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
-  ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
-  geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
-  scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
-  scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
-  xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with scale features')
- 
-ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_scale.pdf'),width=10, height=8)
+# filter_pvalues <- read_rds(here('scratch/filter_pvalues.rds'))
+# filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
+# filter_pvalues <- filter_pvalues %>% filter(type == 'Shape features')
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
+# 
+# ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
+#   ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+# panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+#   geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
+#   scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
+#   scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
+#   xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with shape features')
+#  
+# ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_shape.pdf'),width=10, height=8)
+# 
+# filter_pvalues <- read_rds(here('scratch/filter_pvalues.rds'))
+# filter_pvalues <- filter_pvalues %>% distinct(response, p,type, .keep_all = TRUE)
+# filter_pvalues <- filter_pvalues %>% filter(type == 'Scale features')
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
+# 
+# ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
+#   ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+# panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+#   geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
+#   scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
+#   scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
+#   xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with scale features')
+#  
+# ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_scale.pdf'),width=10, height=8)
 
 ```
 
 
 ```{r}
-filter_shapescale_pvalues = data.frame(matrix(nrow=0, ncol=6))
-for (response in response_types){
-  for (pred in c('shape_and_scale')){
-        path <-  paste(here('scratch/ROCS/'),pred, '/',sep='')
-        files <- grep(paste(response,'_',sep=''),list.files(path = path),fixed=T,value=T)
-        zerofilter_file <- grep('filter1976',files,fixed=T,value=T)
-        print(zerofilter_file)
-        files <- files[files != zerofilter_file]
-        for (f in 1:length(files)){
-          r1 <- compare_rocs(paste(here('scratch/ROCS/'), pred, '/', zerofilter_file,sep=''),paste(here('scratch/ROCS/'), pred, '/', files[[f]],sep=''))
-          v1 <- c(as.numeric(r1[['p.value']]), as.numeric(r1[['estimate']]), response,
-                  convert_predictors %>% filter(name == pred) %>% pull(df_name),
-                  (str_split(str_split(files[[f]], 'filter')[[1]][[2]],'_')[[1]][[1]]))
-        filter_shapescale_pvalues <- rbind(filter_shapescale_pvalues,v1)
-        }
-    }
-  }
-
-lengths <- 2 * c(988, 938,889,839,790,741,691,642,592,543,494,444,395,345,296,247,197,148,98,49)
-percentages <- seq(100,5,-5)
-df <- tibble(filtertype = lengths, p = percentages)
-
-filter_shapescale_pvalues <- setNames(filter_shapescale_pvalues, c('p_value', 'AUC_nofilter', 'AUC_filter', 'response', 'filtertype'))
-filter_shapescale_pvalues <- merge(filter_shapescale_pvalues, df, by = 'filtertype',all.x=T)
-filter_shapescale_pvalues <- filter_shapescale_pvalues %>% distinct(response, p, .keep_all = TRUE)
-saveRDS(filter_shapescale_pvalues, here('scratch/filter_shapescale_pvalues.rds'))
+# filter_shapescale_pvalues = data.frame(matrix(nrow=0, ncol=6))
+# for (response in response_types){
+#   for (pred in c('shape_and_scale')){
+#         path <-  paste(here('scratch/ROCS/'),pred, '/',sep='')
+#         files <- grep(paste(response,'_',sep=''),list.files(path = path),fixed=T,value=T)
+#         zerofilter_file <- grep('filter1976',files,fixed=T,value=T)
+#         print(zerofilter_file)
+#         files <- files[files != zerofilter_file]
+#         for (f in 1:length(files)){
+#           r1 <- compare_rocs(paste(here('scratch/ROCS/'), pred, '/', zerofilter_file,sep=''),paste(here('scratch/ROCS/'), pred, '/', files[[f]],sep=''))
+#           v1 <- c(as.numeric(r1[['p.value']]), as.numeric(r1[['estimate']]), response,
+#                   convert_predictors %>% filter(name == pred) %>% pull(df_name),
+#                   (str_split(str_split(files[[f]], 'filter')[[1]][[2]],'_')[[1]][[1]]))
+#         filter_shapescale_pvalues <- rbind(filter_shapescale_pvalues,v1)
+#         }
+#     }
+#   }
+# 
+# lengths <- 2 * c(988, 938,889,839,790,741,691,642,592,543,494,444,395,345,296,247,197,148,98,49)
+# percentages <- seq(100,5,-5)
+# df <- tibble(filtertype = lengths, p = percentages)
+# 
+# filter_shapescale_pvalues <- setNames(filter_shapescale_pvalues, c('p_value', 'AUC_nofilter', 'AUC_filter', 'response', 'filtertype'))
+# filter_shapescale_pvalues <- merge(filter_shapescale_pvalues, df, by = 'filtertype',all.x=T)
+# filter_shapescale_pvalues <- filter_shapescale_pvalues %>% distinct(response, p, .keep_all = TRUE)
+# saveRDS(filter_shapescale_pvalues, here('scratch/filter_shapescale_pvalues.rds'))
 
 ```
 
 ```{r}
-filter_pvalues <- read_rds(here('scratch/filter_shapescale_pvalues.rds'))
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
-filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
-
-ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
-  ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
-  geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
-  scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
-  scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
-  xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with shape and scale features')
- 
-ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_shapescale.pdf'),width=10, height=8)
+# filter_pvalues <- read_rds(here('scratch/filter_shapescale_pvalues.rds'))
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) > as.numeric(AUC_filter), "significant loss", NA))
+# filter_pvalues <- filter_pvalues %>% mutate(sign = ifelse(as.numeric(format(p_value, scientific = FALSE)) < 0.05 & as.numeric(AUC_nofilter) < as.numeric(AUC_filter), "significant improvement", sign))
+# 
+# ggplot(filter_pvalues, aes(p, response))  + geom_tile(aes(fill = abs(as.numeric(p_value)), color=sign, width=3.7, height=0.7),size=2) + 
+#   ylim(rev(response_labels)) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+# panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+#   geom_text(aes(label = round(as.numeric(p_value), 6)),size=1)  +
+#   scale_fill_gradientn(colours=c("blue", "white"),na.value = 'grey98', limits = c(0,0.05),name='p-value') + 
+#   scale_colour_manual(values=c("green", "red"),na.translate = F,name='') +
+#   xlim(100,0) + xlab('percentage of features included') + ggtitle('Performances with shape and scale features')
+#  
+# ggsave(here('output/Method_comparison/logistic_regression/filter_evaluation_shapescale.pdf'),width=10, height=8)
 
 ```
-
 
 Plot results of predictions with all features and show the deviation of the AUC when testing the models with stratified 5-fold (on PAM50 subtypes)
 
 ```{r}
-AUCs <- here('scratch/glmnetAUCs_ALL_crossvalidation_v3.fst')
-intclust_allAUCs <- c(collect_intclust(AUCs) %>% mutate(label = 'label_split'))
-pam_allAUCs <- c(collect_pam(AUCs) %>% mutate(label = 'label_split'))
-
-for (s in seq(1,5)){
-  file = paste(here('scratch/glmnetAUCs_nondistance_crossvalidation'), s, '.fst', sep='')
-  intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(file) %>% mutate(label = s))
-  pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(label = s))
-
-}
-
-for (s in seq(1,5)){
-  file = paste(here('scratch/glmnetAUCs_distance10_crossvalidation'), s, '.fst', sep='')
-  intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(file) %>% mutate(label = s))
-  pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(label = s))
-
-}
-
-
-generate_plot_withboxplot <- function(df){
-  confidenceIntervals <- df %>% group_by(yaxis, facet_by) %>% summarise(mean_auc = mean(auc), sd_auc = sd(auc)) %>% mutate(error = qnorm(0.975)*sd_auc/sqrt(5)) %>% mutate(up = mean_auc + error) %>% mutate(down = mean_auc - error)
-  
-  aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-  # geom_boxplot(data = df, aes(y=yaxis, x= auc)) + 
-  geom_point(data=confidenceIntervals, aes(x=up, y=yaxis), pch=3) +
-  geom_point(data=confidenceIntervals, aes(x=down, y=yaxis), pch=3) +
-  geom_segment(data=confidenceIntervals, aes(x=down,xend=up, y=yaxis, yend=yaxis))  + 
-
-	geom_point(data = df %>% filter(label == 'label_split'), aes(x = auc, y = yaxis, fill=label),alpha=0.7, size = 2.5, pch = 21) +
-  xlim(0.2,1) +
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position='left',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
-  
-    mkCountBar <- function(DaT){
-  	barCount <- ggplot(data = DaT) +
-  		geom_bar( 
-  			aes(y = samplePositiveTest, x = yaxis), 
-  			width = 0.8, stat = 'identity', fill = 'grey') +
-  		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-  			hjust = 0, nudge_y = 1) +
-  		facet_wrap(vars(facet_by)) +
-  		theme_prj() +
-  		theme(strip.text = element_blank(),
-  			plot.margin = unit(c(0,5,0,0), 'mm'),
-  			axis.line = element_blank(),
-  			axis.text = element_blank(),
-  			axis.ticks = element_blank(),
-  			axis.title.y = element_blank(),) +
-  		labs(y = bquote(italic('n')~'tumours')) +
-  		coord_flip(clip = 'off')
-  	return(barCount)	
+MS_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+pam_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+  for (t in seq(1,5,1)){
+      file = paste(here('scratch/LR_models_run2/glmnetAUCs_MS_crossvalidation_test'), t, '.fst', sep='')
+      MS_allAUCs <- rbind(MS_allAUCs, collect_MolecularSubtypes(file) %>% mutate(type = t))
+      file = paste(here('scratch/LR_models_run2/glmnetAUCs_PAM_crossvalidation_test'), t, '.fst', sep='')
+      pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = t))
   }
-  
-  barCount <- mkCountBar(df[, .SD[1], by = response] %>% filter(label == 'label_split'))
-  
-  icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(9, 0.4))
-  
-  return(icOut)
+
+for (t in seq(1,5,1)){
+      file = paste(here('scratch/glmnetAUCs_MS_crossvalidation_original_test'), t, '.fst', sep='')
+      MS_allAUCs <- rbind(MS_allAUCs, collect_MolecularSubtypes(file) %>% mutate(type = t))
+      file = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_original_test'), t, '.fst', sep='')
+      pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = t))
   
 }
-
-p <- plot_grid(generate_plot_withboxplot(intclust_allAUCs), generate_plot_withboxplot(pam_allAUCs),ncol=1)
-save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_ALL_5foldcrossvalidation.pdf'), p, base_width = 18, base_height = 6)
-
-p <- plot_grid(generate_plot(intclust_allAUCs %>% filter(label == 'label_split')),generate_plot(pam_allAUCs%>% filter(label == 'label_split')), ncol = 1)
-save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_ALL_bestperformance.pdf'), p, base_width = 18, base_height = 6)
-
 
 ```
+
+Show final performance on fixed train/test set.
+
+```{r}
+file = here('scratch/glmnetAUCs_ALL_crossvalidation_v4.fst')
+MS_allAUCs <- rbind(MS_allAUCs, collect_MolecularSubtypes(file) %>% mutate(type = 'test_set'))
+pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = 'test_set'))
+
+p <- plot_grid(generate_plot_withboxplot(MS_allAUCs %>% filter(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)', 'Cell phenotype (Tumour)','Cell phenotype (TME)'))),generate_plot_withboxplot(pam_allAUCs %>% filter(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)', 'Cell phenotype (Tumour)','Cell phenotype (TME)'))), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/MSAndPAM_AUCs_densities_run2.pdf'), p, base_width = 10, base_height = 6)
+
+p <- plot_grid(generate_plot_withboxplot(MS_allAUCs %>% filter(!(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)')))),generate_plot_withboxplot(pam_allAUCs  %>% filter(!(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)')))), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/MSAndPAM_AUCs_ALL_run2.pdf'), p, base_width = 18, base_height = 6)
+```
+
 
 Compare AUCs with selected alphas and 0, 1.
 
 ```{r}
-AUCs <- here('scratch/glmnetAUCs_ALL_crossvalidation_v3.fst')
-AUCs_lasso <- here('scratch/glmnetAUCs_lasso_nofilter.fst')
-AUCs_ridge <- here('scratch/glmnetAUCs_ridge_nofilter.fst')
-
-# intclust_allAUCs <- c(collect_intclust(AUCs) %>% mutate(colours = 'cross_validation'))
-# pam_allAUCs <- c(collect_pam(AUCs) %>% mutate(colours = 'cross_validation'))
-intclust_allAUCs <- as.data.frame(matrix(nrow=0, ncol=12))
-pam_allAUCs <- as.data.frame(matrix(nrow=0, ncol=12))
-intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(AUCs_lasso) %>% mutate(colours = 'lasso') %>% mutate(alpha = 1))
-pam_allAUCs <- rbind(pam_allAUCs, collect_pam(AUCs_lasso) %>% mutate(colours = 'lasso') %>% mutate(alpha = 1)) 
-intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(AUCs_ridge) %>% mutate(colours = 'ridge') %>% mutate(alpha=0))
-pam_allAUCs <- rbind(pam_allAUCs, collect_pam(AUCs_ridge) %>% mutate(colours = 'ridge') %>% mutate(alpha=0))
-
-p <- plot_grid(generate_plot_alphas(intclust_allAUCs),generate_plot_alphas(pam_allAUCs), ncol = 1)
-save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_ALL_lassoridge.pdf'), p, base_width = 19.5, base_height = 6)
+# AUCs <- here('scratch/glmnetAUCs_ALL_crossvalidation_v3.fst')
+# AUCs_lasso <- here('scratch/glmnetAUCs_lasso_nofilter.fst')
+# AUCs_ridge <- here('scratch/glmnetAUCs_ridge_nofilter.fst')
+# 
+# # intclust_allAUCs <- c(collect_intclust(AUCs) %>% mutate(colours = 'cross_validation'))
+# # pam_allAUCs <- c(collect_pam(AUCs) %>% mutate(colours = 'cross_validation'))
+# intclust_allAUCs <- as.data.frame(matrix(nrow=0, ncol=12))
+# pam_allAUCs <- as.data.frame(matrix(nrow=0, ncol=12))
+# intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(AUCs_lasso) %>% mutate(colours = 'lasso') %>% mutate(alpha = 1))
+# pam_allAUCs <- rbind(pam_allAUCs, collect_pam(AUCs_lasso) %>% mutate(colours = 'lasso') %>% mutate(alpha = 1)) 
+# intclust_allAUCs <- rbind(intclust_allAUCs, collect_intclust(AUCs_ridge) %>% mutate(colours = 'ridge') %>% mutate(alpha=0))
+# pam_allAUCs <- rbind(pam_allAUCs, collect_pam(AUCs_ridge) %>% mutate(colours = 'ridge') %>% mutate(alpha=0))
+# 
+# p <- plot_grid(generate_plot_alphas(intclust_allAUCs),generate_plot_alphas(pam_allAUCs), ncol = 1)
+# save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_ALL_lassoridge.pdf'), p, base_width = 19.5, base_height = 6)
 
 
 ```
@@ -1035,53 +576,60 @@ Why does AUC of TME with network properties change with filtering? --> random ef
 
 
 ```{r}
-plot_rocs <- function(response, predictorA, alphaA, filterA){
-    fileA <- paste(here('scratch/ROCS/roc_'),alphaA,'_', filterA,'_', response, '_', predictorA, '.rds', sep='')
-    dfA <- readRDS(fileA)
-    roc1 <- pROC::roc(factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1)) ~ c(as.numeric(unlist(dfA[1]))), direction = "<")
-    plot(roc1,legacy.axes=TRUE, print.auc=TRUE)
-    
-    plot(performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'tpr', 'fpr'), main= paste('AUC', performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'auc')@y.values[[1]]) )
-    # print(performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'auc')@y.values[[1]])
-
-}
-
-plot_rocs('Basal', 'combination', 1, 'None')
+# plot_rocs <- function(response, predictorA, alphaA, filterA){
+#     fileA <- paste(here('scratch/ROCS/roc_'),alphaA,'_', filterA,'_', response, '_', predictorA, '.rds', sep='')
+#     dfA <- readRDS(fileA)
+#     roc1 <- pROC::roc(factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1)) ~ c(as.numeric(unlist(dfA[1]))), direction = "<")
+#     plot(roc1,legacy.axes=TRUE, print.auc=TRUE)
+#     
+#     plot(performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'tpr', 'fpr'), main= paste('AUC', performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'auc')@y.values[[1]]) )
+#     # print(performance(prediction(c(as.numeric(unlist(dfA[1]))), factor(c(as.numeric(unlist(dfA[2]))), levels=c(0,1))), 'auc')@y.values[[1]])
+# 
+# }
+# 
+# plot_rocs('Basal', 'combination', 1, 'None')
 ```
 
 
 ## Feature importance
 
 ```{r}
+response_types <- c(c('Basal','Luminal A', 'Luminal B', 'HER2', 'Normal-like'),c("ERplusHER2-", "ER-HER2-", "ERplusHER2plus", "ER-HER2plus"))
+prediction_types <- c('combination', 'shape_and_scale', 'shape', 'scale', 'TME_proportion', 'tumour_proportion', 'originalTME_proportion', 'originalTumour_proportion')
 
-response_types <- c('Basal','Luminal A', 'Luminal B', 'HER2', 'Normal-like')
-prediction_types <- c('combination', 'shape_and_scale', 'shape', 'scale', 'TME_nw', 'tumour_nw', 'TME_structures', 'TME_proportion', 'tumour_proportion')
-
-toModel <- apply_filtering(10)
+toModel <- apply_filtering(init_predictors, 100)
 toModel <- split(toModel, by = 'isTestCohort')
 sds <- apply(toModel$train, 2, sd)
 stdDF <- tibble(var = colnames(toModel$train), std = sds)
 
 coefList_all <- data.frame(matrix(nrow = 0, ncol = 4))
 for (t in response_types){
-  file <- paste(here('scratch/coeflists/coefList_'), t,sep='')
+  file <- paste('coefList_', t,sep='')
   for (p in prediction_types){
-      temp_file <- paste(file, '_', p, '.rds',sep ='')
-      coefList <- readRDS(temp_file)
+      path <- paste(file, '_', p, sep ='')
+      files <- grep(path,list.files(path = here('scratch/coeflists_run2/')),fixed=T,value=T)
+      for (f in files){
+      coefList <- readRDS(paste(here('scratch/coeflists_run2/'),f,sep=''))
+      coefList <- coefList %>% mutate(var = gsub('_CPh', '',var, fixed=T))
       coefList <- merge(coefList, stdDF, by='var', all.x=T)
-      coefList <- coefList %>% mutate(std_val = val * std) %>% select(-c('val', 'std'))
+      coefList <- coefList %>% mutate(std_val = val * std) %>% dplyr::select(-c('val', 'std'))
       coefList_all <- rbind(coefList_all, coefList)
+      }
   }
 }
 
-coefList_all <- coefList_all %>% mutate(dir = ifelse(std_val < 0, 'neg', 'pos'))
-# coefList_all <- na.omit(coefList_all)
+coefList_all <- na.omit(coefList_all)
+coefList_all <- coefList_all %>% group_by(response, predictor, var) %>% summarise(mean_coef = mean(std_val))
+coefList_all <- coefList_all %>% mutate(dir = ifelse(mean_coef < 0, 'neg', 'pos'))
+```
+```{r}
+response_types <- c(c('Basal','Luminal A', 'Luminal B', 'HER2', 'Normal-like'),c("ER+HER2-", "ER-HER2-", "ER+HER2+", "ER-HER2+"))
 
 for (r in response_types){
   plot_list <- list()
-  for (t in c('tumour_proportion','TME_proportion', 'TME_structures', 'tumour_nw','TME_nw')){
+  for (t in c('tumour_proportion','TME_proportion')){
     p <- ggplot(data = coefList_all %>% filter(response == r) %>% filter(predictor == t)) + 
-      geom_col(aes(x=var, y=abs(std_val),fill=dir)) + theme_bw() + 
+      geom_col(aes(x=var, y=abs(mean_coef),fill=dir)) + theme_bw() + 
       coord_flip() + xlab('') + ylab('Relative importance') + 
       scale_fill_manual(values=c('red','green')) +
       theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
@@ -1091,8 +639,8 @@ for (r in response_types){
   }
   
   for (t in c('shape', 'scale', 'shape_and_scale', 'combination')){
-    p<- ggplot(data = coefList_all  %>% filter(response == r) %>% filter(predictor == t)  %>% arrange(desc(abs(std_val))) %>% slice(1:25)) + 
-    geom_col(aes(x=reorder(var,abs(std_val)), y=abs(std_val),fill=dir)) + theme_bw() +
+    p<- ggplot(data = coefList_all  %>% filter(response == r) %>% filter(predictor == t)  %>% arrange(desc(abs(mean_coef))) %>% slice(1:25)) + 
+    geom_col(aes(x=reorder(var,abs(mean_coef)), y=abs(mean_coef),fill=dir)) + theme_bw() +
     coord_flip() + xlab('') + ylab('Relative importance') +
     scale_fill_manual(values=c('red','green')) + 
     theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black")) +
@@ -1103,495 +651,436 @@ for (r in response_types){
   
   plot_grid(plotlist = plot_list, ncol = 3)
   
-  ggsave(paste(here('output/Method_comparison/feature_importance/feature_importance_'), r, '.pdf',sep = ''),width=15,height=15)
+  ggsave(paste(here('output/Method_comparison/feature_importance/feature_importance_'), gsub('+', 'plus', r, fixed=T), '.pdf',sep = ''),width=15,height=15)
 
 }
-
-
-
 ```
+
+
+
 ```{r}
-coefList_all_withoutCombi <- coefList_all %>% filter(predictor != 'combination') %>% filter(predictor != 'shape_and_scale')
-allCoefficients <- coefList_all_withoutCombi %>% tidyr::expand(response, var)
-allCoefficients <- merge(allCoefficients, coefList_all_withoutCombi, by= c('response', 'var'),all.x=T)
-allCoefficients <- allCoefficients %>% filter(var != '(Intercept)') 
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(binary = ifelse(std_val != 0, 1, 0))
+coefList_all <- coefList_all %>% mutate(var = gsub('_CPh', '', var, fixed=T))
+coefList_all_withoutCombi <- coefList_all %>% filter(predictor != 'combination') %>% filter(predictor != 'shape_and_scale') %>% filter(mean_coef  > 0.1 | mean_coef < -0.1)
+coefList_all_withCombi <- coefList_all %>% filter(predictor == 'combination')  %>% filter(mean_coef  > 0.1 | mean_coef < -0.1)
 
-categories <- list(cPh_tumour, cPh_tme, newNames, nwPredictorsTumour, nwPredictorsTME,grep('shape', colnames(apply_filtering(5)), value=T),grep('scale', colnames(apply_filtering(5)), value=T))
+saveRDS(coefList_all, here('scratch/multivariateFeatureImportance.rds'))
 
+ylabels <- function(coefList){
+  all <- c(cPh_tumour, cPh_tme, cPh_tumour_original, cPh_tme_original,sort(unlist(grep('shape', colnames(apply_filtering(init_predictors, 100)), value=T))),sort(unlist(grep('scale', colnames(apply_filtering(init_predictors, 100)), value=T))))
+  selection <- intersect(all, coefList$var)
+  
+  return(selection)
+}
 
-allCoefficientsCorrected <- allCoefficients %>% group_by(response, predictor) %>% summarise(max_value = max(abs(std_val))) %>% filter(predictor != 0)
-allCoefficients <- merge(allCoefficients, allCoefficientsCorrected, by= c('response', 'predictor'), all.x=T)
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(std_val_percentage = ifelse(max_value != 0, (std_val/max_value)*100, std_val))
-allCoefficients <- allCoefficients %>% mutate(odds = exp(std_val))
-
-ggplot(allCoefficients, aes(response,var))  + geom_tile(aes(fill = dir))  + 
-  geom_text(aes(label = abs(round(as.numeric(odds),2))),size=1)  +
+plot_coefficients <- function(coefList){
+  ggplot(coefList, aes(response,var))  + 
+  geom_tile(aes(fill = mean_coef))  + 
+  geom_text(aes(label = (round(as.numeric(mean_coef),2))),size=3)  +
   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.y = element_text(size = 4)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') + ylim((c(unlist(cPh_tumour), unlist(cPh_tme), unlist(newNames), unlist(nwPredictorsTumour), unlist(nwPredictorsTME),unlist(grep('shape', colnames(apply_filtering(10)), value=T)),unlist(grep('scale', colnames(apply_filtering(10)), value=T)) )))
-ggsave(here('output/Method_comparison/feature_importance/overview.pdf'),height=20)
+  panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10)) +
+  # theme(axis.text.y = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  # scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') +
+  scale_fill_gradientn(colours=c("red",'white', "green"),limits = c(min(coefList$mean_coef),max(coefList$mean_coef)),values = c(0,abs(min(coefList$mean_coef))/(abs(min(coefList$mean_coef))+abs(max(coefList$mean_coef))) ,1),name='coefficient') +
+  ylim(ylabels(coefList)) + xlim(response_types) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+}
 
-allCoefficients_extremes <- allCoefficients %>% group_by(var) %>% summarise(min_value = min(odds), max_value = max(odds))
-allCoefficients_extremes <- allCoefficients_extremes %>% filter(min_value < 0.7| max_value > 1.3)
-ggplot(allCoefficients %>% filter(var %in% (allCoefficients_extremes %>% pull(var))), aes(response,var))  + geom_tile(aes(fill = dir))  + 
-  geom_text(aes(label = abs(round(as.numeric(odds),2))),size=3)  +
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.y = element_text(size = 7)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') +  ylim(intersect(c(unlist(cPh_tumour), unlist(cPh_tme), unlist(newNames), unlist(nwPredictorsTumour), unlist(nwPredictorsTME),unlist(grep('shape', colnames(apply_filtering(10)), value=T)),unlist(grep('scale', colnames(apply_filtering(10)), value=T)) ),(allCoefficients_extremes %>% pull(var)) ))
-ggsave(here('output/Method_comparison/feature_importance/sign_overview.pdf'),height=10)
+p <- plot_coefficients(coefList_all_withoutCombi)
+ggsave(here('output/Method_comparison/feature_importance/overview_run2.pdf'),height=15, width=10)
+
+p <- plot_coefficients(coefList_all_withCombi)
+ggsave(here('output/Method_comparison/feature_importance/overview_combination_run2.pdf'),height=10, width=12)
 
 
-coefList_all_withCombi <- coefList_all %>% filter(predictor == 'combination')
-allCoefficients <- coefList_all_withCombi %>% tidyr::expand(response, var)
-allCoefficients <- merge(allCoefficients, coefList_all_withCombi, by= c('response', 'var'),all.x=T)
-allCoefficients <- allCoefficients %>% filter(var != '(Intercept)') 
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(binary = ifelse(std_val != 0, 1, 0))
-
-allCoefficientsCorrected <- allCoefficients %>% group_by(response, predictor) %>% summarise(max_value = max(abs(std_val))) %>% filter(predictor != 0)
-allCoefficients <- merge(allCoefficients, allCoefficientsCorrected, by= c('response', 'predictor'), all.x=T)
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(std_val_percentage = ifelse(max_value != 0, (std_val/max_value)*100, std_val))
-allCoefficients <- allCoefficients %>% mutate(odds = exp(std_val))
-
-ggplot(allCoefficients, aes(response,var))  + geom_tile(aes(fill = dir))  + 
-  geom_text(aes(label = abs(round(as.numeric(odds),2))),size=1)  +
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.y = element_text(size = 4)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') + ylim((c(unlist(cPh_tumour), unlist(cPh_tme), unlist(newNames), unlist(nwPredictorsTumour), unlist(nwPredictorsTME),unlist(grep('shape', colnames(apply_filtering(10)), value=T)),unlist(grep('scale', colnames(apply_filtering(10)), value=T)) )))
-ggsave(here('output/Method_comparison/feature_importance/overview_combination.pdf'),height=20)
-
-allCoefficients_extremes <- allCoefficients %>% group_by(var) %>% summarise(min_value = min(odds), max_value = max(odds))
-allCoefficients_extremes <- allCoefficients_extremes %>% filter(min_value < 0.8| max_value > 1.2)
-ggplot(allCoefficients %>% filter(var %in% (allCoefficients_extremes %>% pull(var))), aes(response,var))  + geom_tile(aes(fill = dir))  + 
-  geom_text(aes(label = abs(round(as.numeric(odds),2))),size=3)  +
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.y = element_text(size = 7)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') +  ylim(intersect(c(unlist(cPh_tumour), unlist(cPh_tme), unlist(newNames), unlist(nwPredictorsTumour), unlist(nwPredictorsTME),unlist(grep('shape', colnames(apply_filtering(10)), value=T)),unlist(grep('scale', colnames(apply_filtering(10)), value=T)) ),(allCoefficients_extremes %>% pull(var)) ))
-ggsave(here('output/Method_comparison/feature_importance/sign_overview_combination.pdf'),height=10)
 
 coefList_all_withCombi <- coefList_all %>% filter(predictor == 'shape_and_scale')
-allCoefficients <- coefList_all_withCombi %>% tidyr::expand(response, var)
-allCoefficients <- merge(allCoefficients, coefList_all_withCombi, by= c('response', 'var'),all.x=T)
-allCoefficients <- allCoefficients %>% filter(var != '(Intercept)') 
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(binary = ifelse(std_val != 0, 1, 0))
-
-allCoefficientsCorrected <- allCoefficients %>% group_by(response, predictor) %>% summarise(max_value = max(abs(std_val))) %>% filter(predictor != 0)
-allCoefficients <- merge(allCoefficients, allCoefficientsCorrected, by= c('response', 'predictor'), all.x=T)
-allCoefficients <- replace(allCoefficients,is.na(allCoefficients),0)
-allCoefficients <- allCoefficients %>% mutate(std_val_percentage = ifelse(max_value != 0, (std_val/max_value)*100, std_val))
-allCoefficients <- allCoefficients %>% mutate(odds = exp(std_val))
-
-ggplot(allCoefficients, aes(response,var))  + geom_tile(aes(fill = dir))  + 
-  geom_text(aes(label = abs(round(as.numeric(odds),2))),size=1)  +
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
-panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.y = element_text(size = 4)) +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') + ylim((c(unlist(cPh_tumour), unlist(cPh_tme), unlist(newNames), unlist(nwPredictorsTumour), unlist(nwPredictorsTME),unlist(grep('shape', colnames(apply_filtering(10)), value=T)),unlist(grep('scale', colnames(apply_filtering(10)), value=T)) )))
-ggsave(here('output/Method_comparison/feature_importance/overview_shapeAndScale.pdf'),height=20)
+ggsave(here('output/Method_comparison/feature_importance/overview_shapeAndScale_run2.pdf'),height=20)
 ```
 
-
-## Exact reproduction
+Do the considered features contain common cell types. 
 
 ```{r}
-source(here("UtilityFunctions.R"))
+subset <- coefList_all_withoutCombi  %>% filter(predictor == 'shape' |predictor == 'scale')  %>% ungroup(predictor) %>% select(-c(predictor))
+subset <- subset %>% separate(var, c('phenotype_from', 'phenotype_to'), sep = '_to_')  %>% mutate(phenotype_from = gsub('scale_', '', phenotype_from, fixed=T)) %>% mutate(phenotype_from = gsub('shape_', '', phenotype_from, fixed=T))
+phenotype_from <- subset %>% group_by(response, phenotype_from) %>% summarise(n = n()) %>% mutate(type = 'phenotype_from')
+phenotype_to <- subset  %>% group_by(response, phenotype_to)  %>% count(phenotype_to) %>% mutate(type = 'phenotype_to')
+coef_count <- rbind(phenotype_from, phenotype_to)
 
-cells <- getCells()[(isTumour)]
+ggplot(coef_count %>% filter(type == 'phenotype_from'), aes(response, phenotype_from)) + geom_tile(aes(fill = n))  + geom_text(aes(label = n),size=5,color='white') + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10))  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(response_types) + ylim(c(c(unlist(gsub('_CPh', '', cPh_tumour, fixed=T)), unlist(gsub('_CPh', '', cPh_tme, fixed=T)))))
 
-# Compute proportions: all, tumour, stroma, vascular, interface
-mkProportionBy <- function(byvars, dt, suffix){
+ggsave(here('output//Method_comparison/feature_importance/overview_run2_FROMcounts.pdf'),height=7,width=10)
 
-	countsBy <- byvars
-	totalsBy <- setdiff(byvars, 'meta_description')
-	outVar <- paste0('proportion_',suffix)
+ggplot(coef_count %>% filter(type == 'phenotype_to'), aes(response, phenotype_to)) + geom_tile(aes(fill = n))  + geom_text(aes(label = n),size=5,color='white') + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10))  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(response_types) + ylim(c(c(unlist(gsub('_CPh', '', cPh_tumour, fixed=T)), unlist(gsub('_CPh', '', cPh_tme, fixed=T)))))
 
-	dt[, counts := .N, by = byvars]
-	dt[, totals := .N, by = totalsBy]
-	dt[, eval(outVar) := (counts / totals)]
-	dt[, eval(c('counts', 'totals')) := NULL]
-	return(dt)
-}
+ggsave(here('output//Method_comparison/feature_importance/overview_run2_TOcounts.pdf'),height=7,width=10)
 
-ptCellVars <- c('metabric_id', 'meta_description') 
-mkProportionBy(byvars = ptCellVars,dt = cells, suffix = 'all')
-
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial'),
-	dt = cells, suffix = 'isEpi')
-
-cells[, is_vascular := (Parent_vessel != 0)]
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
-	dt = cells, suffix = 'isVesselByEpi')
-
-mkProportionBy(
-	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
-	dt = cells, suffix = 'isInterfaceByEpi')
-
-proportionVars <- grep('proportion_', names(cells), value = T)
-phenotypeVars <- grep('meta_|phenotype|colours', names(cells), value = T)
-indicatorVars <- grep('^is_', names(cells), value = T)
-indicatorVars <- setdiff(indicatorVars, c('is_normal', 'is_dcis'))
-
-toKeep <- c(ptCellVars, proportionVars, phenotypeVars, indicatorVars)
-proportionsOut <- cells[, .SD, .SDcols = toKeep]
-proportionsOut <- melt(proportionsOut,
-	id.vars = c('metabric_id', phenotypeVars, indicatorVars),
-	measure.vars = proportionVars,
-	value = 'proportion',
-	variable = 'type'
-	)	
-proportionsOut[, type := gsub('proportion_', '', type)]
-proportionsOut[type == 'isEpi', 
-	type := ifelse(is_epithelial, 'tumour', 'stroma')]
-proportionsOut[type == 'isVesselByEpi', 
-	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
-proportionsOut[type == 'isInterfaceByEpi', 
-	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
-proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
-proportionsOut[, type := gsub('ByEpi', '', type)]
-proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
-	newSuffix := NULL]
-proportionsOut <- proportionsOut[, .SD[1], by = .(metabric_id, meta_id, type)]
-proportionsOut[, type := gsub(' ', '', type)]
-
-proportionsOut[, check := sum(proportion), by = .(metabric_id, type)]
-stopifnot(all.equal(rep(1, nrow(proportionsOut)), proportionsOut[['check']]))
-proportionsOut[, check := NULL]
-
-outfile <- here('scratch/cellPhenotypeProportions.fst')
-write_fst(proportionsOut, outfile)
 
 ```
 
+## Univariate evaluation
+Analyse the individual effect of features.
 
 ```{r}
-# Structures
-outDir <- here('scratch')
-TMEStructures <- here('scratch/ptLeveLTMEInteractions.fst')
-TMEStructures <- read_fst(TMEStructures, as.data.table = T)
-IDs <- getCells()[, .(metabric_id, isDiscovery)]
-IDs <- IDs[, .SD[1], by = metabric_id]
-TMEStructures <- merge(x = TMEStructures, y = IDs, by = 'metabric_id') 
-TMEStructures[, isTestCohort := ifelse(isDiscovery, 'train', 'test')]
-setnames(TMEStructures, 
-	c('nInteractionsPerStructure', 'TotalInteractions'),
-	c('module_count', 'total_communities'))
-TMEStructures[, proportion := module_count / total_communities]
-TMEStructures[, proportion := gtools::logit(ifelse(proportion == 1, proportion - 1e-6, proportion + 1e-6))]
-structures <- getStructures()
-predictors <- TMEStructures[, .(metabric_id, TMEStructure, proportion, total_communities, isTestCohort)]
-predictors[, weights := sum(unique(total_communities)), by = metabric_id]
-predictors[, total_communities := NULL]
-predictors <- dcast(predictors, metabric_id + weights + isTestCohort ~ TMEStructure, value.var = 'proportion')
-oldNames <- grep('metabric_id|weights|isTestCohort', names(predictors), invert = TRUE, value = TRUE)
-newNames <- paste0('TMEStructure', oldNames)
-setnames(predictors, oldNames, newNames)
-	
-# Network properties
-nwP <- here('scratch/NetworkProperties.rds')
-nwP <- readRDS(nwP)
-standardiseNwP <- function(name){
-	dt <- nwP[[name]]
-	setnames(dt, grep('communities_', names(dt), value = TRUE), 'communityID')
-	dt[, type := name]
-	return(dt)
+original_density_features <- getCellProportionsPerImage() %>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(original_density_features) <- gsub('_CPh', '_originalClass', colnames(original_density_features), fixed = T)
+
+density_features <- getCellProportionsPerImageAlternative()%>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+  
+generate_matrix_zeroOneScaling <- function(df, col_rownames ,subselection=NULL, NA_percentage=0, scale_rows=FALSE){
+  m <- as.data.frame(df)
+  rownames(m) <- m[,col_rownames]
+  m <- subset(m,select = -c(get(col_rownames)))
+  
+  # Filtering
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+
+  m <- replace(m,is.na(m),0)
+  m <- as.data.frame(m)
+  
+  
+  # Scaling
+  m <- apply(m, 2, function(x) (x - min(x)) / (max(x) - min(x)))
+  
+  
+  return(m)
 }
-nwP <- rbindlist(lapply(c('stroma', 'tumour'), standardiseNwP))
-IDs <- getCells()[, .(ImageNumber, metabric_id)][, .SD[1], by = ImageNumber]
-nwP <- merge(x = nwP, y = IDs, by = 'ImageNumber') 
-nwP[, assortativity := NULL] #has NAs
-measureVars <- grep('ImageNumber|communityID|type|metabric_id', names(nwP), 
-	invert = TRUE, value = TRUE)
-PtmeasureVars <- paste0(measureVars, 'PtMean')
-nwP[, eval(PtmeasureVars) := lapply(.SD, mean), by = .(type, metabric_id), .SDcols = measureVars]
-nwP <- nwP[, .SD[1], by = .(type, metabric_id)]
-nwP <- nwP[, .SD, .SDcols = c('metabric_id', 'type', PtmeasureVars)]
-nwP <- melt(nwP, id.vars = c('metabric_id', 'type'))
-nwP[, variable := paste0(variable, '_', type)]
-nwP <- dcast(nwP, metabric_id ~ variable)
-nwP <- na.omit(nwP)
-nwPredictorsTumour <- grep('_tumour', names(nwP), invert = F, value = T)
-nwPredictorsTME <- grep('_stroma', names(nwP), invert = F, value = T)
-predictors <- merge(x = predictors, y = nwP, by = 'metabric_id') 
 
-# Cell phenotype proportions
-cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
-cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
-cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
-cellPhenotypes <- cellPhenotypes[, .(metabric_id, type, meta_description, proportion)]
-allCombinations <- adt(expand.grid(unique(cellPhenotypes[,metabric_id]), unique(cellPhenotypes[,meta_description])))
-setnames(allCombinations, c('metabric_id', 'meta_description'))
-allCombinations <- merge(x = allCombinations, 
-   y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
-   by = 'meta_description') 
-cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
-   by = c('metabric_id', 'meta_description', 'type'), all.x = T) 
-cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
-cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
-cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
-cellPhenotypes[is.na(proportion), proportion := 0]
-cellPhenotypes[, checkBothCompartments := sum(proportion), by = .(metabric_id, type)]
-cellPhenotypes <- cellPhenotypes[checkBothCompartments > 0][, checkBothCompartments := NULL]
-cellPhenotypes <- dcast(cellPhenotypes, metabric_id ~ meta_description, value.var = 'proportion')
-cellPhenotypes <- na.omit(cellPhenotypes) # samples that contain both tumour and stromal cells
-predictors <- merge(x = predictors, y = cellPhenotypes, by = 'metabric_id')
-
+shape_features <- generate_matrix_zeroOneScaling(shape_features,'tnumber')
+scale_features <- generate_matrix_zeroOneScaling(scale_features,'tnumber')
+density_features <- generate_matrix_zeroOneScaling(density_features, 'ImageNumber')
+original_density_features <- generate_matrix_zeroOneScaling(original_density_features, 'ImageNumber')
 ```
 
 ```{r}
-clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
+# Load required libraries
+library(multcomp)
+library(ggrepel)
 
-# Response intclusts
-intClust <- as.data.table(clinical_data)[, .(metabric_id, IntClust)]
-intClust <- intClust[!is.na(IntClust)]
-for(i in sortunique(intClust$IntClust)) intClust[, eval(i) := as.numeric(IntClust == i)]
-intClust[, IntClust := NULL]
+computePvalues <- function(featureSet, r){
+  print(r)
+  subset <- merge(featureSet, clinical_data %>% dplyr::select(c(ImageNumber, ER_HER2_status, PAM50)), by.x='row.names', by.y='ImageNumber') %>% dplyr::select(-dplyr::any_of(c('Row.names', 'ImageNumber')))
+  subset <- subset %>% mutate(group = ifelse(PAM50 == r | ER_HER2_status == r, r, paste('no', r)))
 
-# Response PAM groups
-PAM50 <- as.data.table(clinical_data)[, .(metabric_id, PAM50)]
-PAM50 <- PAM50[!is.na(PAM50)]
-for(i in sortunique(PAM50$PAM50)) PAM50[, eval(i) := as.numeric(PAM50 == i)]
-PAM50[, PAM50 := NULL]
+  subset <- subset %>% dplyr::select(-c(ER_HER2_status, PAM50))
+  response <- subset$group
 
-toModel <- merge(x = predictors, y = intClust, by = 'metabric_id', all.x = T)
-toModel <- merge(x = toModel, y = PAM50, by = 'metabric_id', all.x = T)
+  # Create an empty vector to store the adjusted p-values and log2 fold changes
+  p_values <- rep(NA, ncol(subset)-1)
+  log2_fold_changes <- rep(NA, ncol(subset)-1)
 
-fitModel <- function(response, predictors, Weights, dt){
-	dt <- dt[, .SD, .SDcols = c(response, predictors, Weights)]	
-	dt <- na.omit(dt)
-	weights <- dt[, get(Weights)]
-	response <- as.numeric(dt[, get(response)])
-	predictors <- dt[, .SD, .SDcols = predictors]
-	lassoFit <- cv.glmnet(as.matrix(predictors), as.matrix(response), weights = weights, 
-		family = 'binomial', nlambda = 100, nfolds = 20, alpha = 0)
-	return(lassoFit)
-}
-toModel <- split(toModel, by = 'isTestCohort')
-responseVars <- grep('IntClust', names(toModel$train), value = T)
-responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
+  # Perform univariate feature importance analysis for each feature
+  for (i in 1:(ncol(subset)-1)) {
+    # Extract the current feature
+    feature <- subset[, i]
 
-getAUC <- function(
-	responseVar, # character column name
-	predictors, # character vector of column names
-	Weights, # character column name
-	testTrain # list of dts named 'train' and 'test' 
-	){
+    # Perform a t-test to assess the significance of the feature
+    test_result <- t.test(feature ~ response)
 
-	sampleSizeTrain <- testTrain$train[!is.na(get(responseVar)), .N]
-	samplePositiveTrain <- testTrain$train[get(responseVar) == 1, .N]
+    # Extract the p-value from the test result
+    p_value <- test_result$p.value
 
-	sampleSizeTest <- testTrain$test[!is.na(get(responseVar)), .N]
-	samplePositiveTest <- testTrain$test[get(responseVar) == 1, .N]
+    # Calculate the log2 fold change between the response groups
+    mean_response <- tapply(feature, response, mean)
+    log2_fold_change <- log2((mean_response[r]+0.001) / mean_response[paste('no', r)])
 
-	modelFit <- fitModel(response = responseVar, predictors = predictors, 
-		Weights = Weights, dt = testTrain$train)
+    # Store the p-value and log2 fold change in their respective vectors
+    p_values[i] <- p_value
+    log2_fold_changes[i] <- log2_fold_change
+  }
 
-	testDt <- testTrain$test[, .SD, .SDcols = c(responseVar, predictors)]
-	testDt <- na.omit(testDt)
-	testMat <- as.matrix(testDt[, .SD, .SDcols = predictors])
-	predictions <- predict(modelFit, testMat, type = 'response', s = 'lambda.min')
-	trueLabels <- as.numeric(testDt[, get(responseVar)])
-	predictObj <- prediction(predictions, trueLabels)
-	auc <- performance(predictObj,"auc") 
-	auc <- as.numeric(auc@y.values)
-	return(data.table(
-		sampleSizeTrain = sampleSizeTrain, samplePositiveTrain = samplePositiveTrain,
-		sampleSizeTest = sampleSizeTest, samplePositiveTest = samplePositiveTest,
-		response = responseVar, auc = auc))
+  # Apply p-value adjustment method (e.g., Bonferroni, Benjamini-Hochberg)
+  adjusted_p_values <- p.adjust(p_values, method = "bonferroni")
+
+  # Create a data frame with the features, p-values, log2 fold changes, and adjusted p-values
+  result <- data.frame(Feature = colnames(subset %>% dplyr::select(-c(group))),
+                       p_value = p_values,
+                       log2FoldChange = log2_fold_changes,
+                       Adjusted_p_value = adjusted_p_values) %>%
+            mutate(Sig = ifelse(Adjusted_p_value < 0.05, T, F))
+
+  return(result)
 }
 
-mkAUCsTable <- function(Rep, predictors){
-	mkAUC <- function(responseVar, predictors, Weights, testTrain){
-		tryCatch(
-			expr = {getAUC(responseVar, predictors, Weights, testTrain)},
-			error = function(e){return(NULL)}
-			)
-	}
-	AUCs <- rbindlist(mclapply(responseVars, mkAUC, predictors = predictors, 
-		Weights = 'weights', testTrain = toModel, mc.cores = 12))
-	AUCs[, rep := Rep]
-	return(AUCs)
+
+
+univariateFeatureImportance <- data.frame(matrix(nrow=0, ncol=7))
+for (s in setdiff(unique(clinical_data$PAM50),NA)){
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(original_density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'original_densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(shape_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'shape'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(scale_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'scale'))
+
 }
 
-# Fit modeltypes
-RNGkind("L'Ecuyer-CMRG")
-mc.reset.stream()
-doAUCs <- function(predictors){
-	Reps <- seq_len(1)
-	AUCs <- rbindlist(lapply(Reps, mkAUCsTable, predictors = predictors))
-	return(AUCs)
+for (s in setdiff(unique(clinical_data$ER_HER2_status),NA)){
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(original_density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'original_densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(shape_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'shape'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(scale_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'scale'))
+
 }
-TMEStructurePredictors <- grep('TMEStructure[0-9]*', names(predictors), value = TRUE)
-AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, cPh_tumour, cPh_tme)
-AUCs <- lapply(list(cPh_tumour, cPh_tme, TMEStructurePredictors, 
-	nwPredictorsTumour, nwPredictorsTME, AllPredictors), doAUCs)
-names(AUCs) <- c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures', 
-	'Network properties (Tumour)', 'Network properties (TME)', 'Combined')
 
-modeltypes <- seq_len(length(AUCs))
-names(modeltypes) <- names(AUCs)
-AUCs <- rbindlist(lapply(names(AUCs), function(name){AUCs[[name]][, type := name]}))
+univariateFeatureImportance <- univariateFeatureImportance %>% mutate(minlogP = -log(Adjusted_p_value, base = 10))
 
-AUCs[, facet_by := modeltypes[type]]
-AUCs[, facet_by := factor(facet_by, 
-	levels = modeltypes, labels = names(modeltypes), ordered = TRUE)]
-outfile <- here('scratch/glmnetAUCs_reproduction.fst')
-write_fst(AUCs, outfile)
-
+saveRDS(univariateFeatureImportance, here('scratch/univariateFeatureImportance.rds'))
 ```
 
+
+## Volcano plots
+
 ```{r}
-AUCs <- here('scratch/glmnetAUCs_reproduction.fst')
-AUCs <- read_fst(AUCs, as.data.table = T)
+# Creating the volcano plot
+fold_threshold = 1
+p_value = -log10(0.05)
+univariateFeatureImportance <- univariateFeatureImportance %>% mutate(Sig = ifelse((minlogP > -log10(0.05)) & (log2FoldChange < -fold_threshold | log2FoldChange > fold_threshold), T, F))
 
-intClustAUCs <- AUCs[grep('IntClust', response)]
-# Plot ic10 AUCs
-intClustCols <- getSubtypeCols()
-intClustCols <- intClustCols$IntClust
-intClustAUCs[, yaxis := as.numeric(gsub('IntClust ', '', response))]
-intClustAUCs[yaxis > 4, yaxis := yaxis + 2]
-intClustAUCs[grep('4\\+', response), yaxis := 4]
-intClustAUCs[grep('4\\-', response), yaxis := 5]
-intClustAUCs[grep('5\\+', response), yaxis := 6]
-intClustAUCs[grep('5\\-', response), yaxis := 7]
-intClustAUCs <- intClustAUCs[order(type, yaxis),]
+print(univariateFeatureImportance %>% filter(Sig == T) %>% filter(featureSet == 'densities'))
 
-intClustAUCs[, yaxis := factor(yaxis, 
-	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
-intClustAUCs[, colours := intClustCols[response]]
-intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
 
-aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-	geom_point(data = intClustAUCs, 
-		aes(x = auc, y = yaxis, colour = colours), size = 2.5,
-		pch = 21, fill = 'lightgrey') +
-	geom_point(data = intClustAUCs[auc > 0.5], 
-		aes(x = auc, y = yaxis, fill = colours), size = 3,
-		pch = 21, colour = 'black') +
-	scale_fill_identity() +
-	scale_colour_identity() +
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position = 'none',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
+ggplot() +
+  geom_point(data = (univariateFeatureImportance %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response)) +
+  geom_point(data = (univariateFeatureImportance %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP),color='grey') +
+  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value",
+       title = "Univariate feature importance") + geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+        geom_hline(yintercept=-log10(0.05), col="black") +theme_bw()
 
-mkCountBar <- function(DaT){
-	barCount <- ggplot(data = DaT) +
-		geom_bar( 
-			aes(y = samplePositiveTest, x = yaxis), 
-			width = 0.8, stat = 'identity', fill = 'grey') +
-		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-			hjust = 0, nudge_y = 1) +
-		facet_wrap(vars(facet_by)) +
-		theme_prj() +
-		theme(strip.text = element_blank(),
-			plot.margin = unit(c(0,5,0,0), 'mm'),
-			axis.line = element_blank(),
-			axis.text = element_blank(),
-			axis.ticks = element_blank(),
-			axis.title.y = element_blank(),) +
-		labs(y = bquote(italic('n')~'tumours')) +
-		coord_flip(clip = 'off')
-	return(barCount)	
-}
-barCount <- mkCountBar(intClustAUCs[, .SD[1], by = response])
+ggsave(here('output/Method_comparison/feature_importance/univariate_volcanoplot.pdf'))
 
-icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(6, 0.4))
-outfile <- here('output/Danenberg_reproduction/intClustAUCs.pdf')
-save_plot(outfile, icOut, base_width = 13, base_height = 3)
+```
+## Merge feature selection
+
+```{r}
+coefList_all <- readRDS(here('scratch/multivariateFeatureImportance.rds'))
+univariateFeatureImportance <- readRDS(here('scratch/univariateFeatureImportance.rds')) %>% mutate(Feature = (ifelse(featureSet == 'shape' | featureSet == 'scale',paste(featureSet,Feature, sep='_'),Feature)))
+
+individualmodels <- coefList_all %>% filter(predictor == 'TME_proportion' | predictor == 'tumour_proportion' | predictor == 'scale' | predictor == 'shape' | predictor == 'shape_and_scale') %>% filter(mean_coef < -0.1 | mean_coef > 0.1) %>% mutate(binary = 1) %>%ungroup(predictor) %>% distinct(response,var)  %>% mutate(binary = 1)
+
+combinedmodel <- coefList_all %>% filter(predictor == 'combination') %>% filter(mean_coef < -0.1 | mean_coef > 0.1)  %>% mutate(binary = 1)  %>%ungroup(predictor) %>% distinct(response,var)  %>% mutate(binary = 1)
+
+UnivariateModel <- univariateFeatureImportance %>% filter(Sig == T) %>% mutate(Feature = gsub('_CPh','', Feature, fixed=T)) %>% distinct(response,Feature)  %>% mutate(binary = 1)
+
+individualmodelsMatrix <- reshape2::dcast(individualmodels, response ~ var,value.var = 'binary' )
+individualmodelsMatrix[is.na(individualmodelsMatrix)] <- 0
+rownames(individualmodelsMatrix) <- individualmodelsMatrix$response
+individualmodelsMatrix <- individualmodelsMatrix %>% dplyr::select(-c(response))
+
+univariatemodelMatrix <- reshape2::dcast(UnivariateModel,response ~ Feature, value.var='binary')
+univariatemodelMatrix[is.na(univariatemodelMatrix)] <- 0
+rownames(univariatemodelMatrix) <- univariatemodelMatrix$response
+univariatemodelMatrix <- univariatemodelMatrix %>% dplyr::select(-c(response))
+
+combinedmodelMatrix <- reshape2::dcast(combinedmodel, response ~ var, value.var ='binary')
+combinedmodelMatrix[is.na(combinedmodelMatrix)] <- 0
+rownames(combinedmodelMatrix) <- combinedmodelMatrix$response
+combinedmodelMatrix['Normal-like',] <- 0
+combinedmodelMatrix['ER-HER2-',] <- 0
+combinedmodelMatrix <- combinedmodelMatrix %>% dplyr::select(-c(response))
+
+
 
 ```
 
 
 ```{r}
-AUCs <- here('scratch/glmnetAUCs_reproduction.fst')
-AUCs <- read_fst(AUCs, as.data.table = T)
-
-intClustAUCs <- AUCs[grep('HER|Basal|Luminal|Normal', response)]
-# Plot ic10 AUCs
-intClustCols <- getSubtypeCols()
-intClustCols <- intClustCols$PAM50
-
-intClustAUCs[, yaxis := ifelse(response=='Basal', 1, ifelse(response=='HER2', 2,ifelse(response=='Luminal A', 3, ifelse(response=='Luminal B', 4, 5))))]
-# intClustAUCs[yaxis > 4, yaxis := yaxis + 2]
-# intClustAUCs[grep('4\\+', response), yaxis := 4]
-# intClustAUCs[grep('4\\-', response), yaxis := 5]
-# intClustAUCs[grep('5\\+', response), yaxis := 6]
-# intClustAUCs[grep('5\\-', response), yaxis := 7]
-intClustAUCs <- intClustAUCs[order(type, yaxis),]
-
-intClustAUCs[, yaxis := factor(yaxis, 
-	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
-intClustAUCs[, colours := intClustCols[response]]
-intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
-
-x <- c("Cell phenotype (Tumour)","Cell phenotype (TME)","TME Structures", "Network properties (Tumour)", "Network properties (TME)","shape features","scale features", "shape and scale features",  "Combined")
-
-intClustAUCs <- intClustAUCs %>%
-arrange(sapply(type, function(y) which(y == x)))
-
-aucPlot <- ggplot() +
-	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
-	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
-	geom_point(data = intClustAUCs, 
-		aes(x = auc, y = yaxis, colour = colours), size = 2.5,
-		pch = 21, fill = 'lightgrey') +
-	geom_point(data = intClustAUCs[auc > 0.5], 
-		aes(x = auc, y = yaxis, fill = colours), size = 3,
-		pch = 21, colour = 'black') +
-	scale_fill_identity() +
-	scale_colour_identity() +
-	theme_prj(base_line_size = 0.25) +
-	theme(legend.position = 'none',
-		panel.background = element_rect(colour = 'black', size = 0.25),
-		axis.title.y = element_blank(),
-		axis.ticks.y = element_blank(),
-		panel.spacing.x = unit(1,'mm'),
-		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
-	facet_wrap(vars(facet_by), nrow = 1) +
-	labs(x = 'AUC')
-
-mkCountBar <- function(DaT){
-	barCount <- ggplot(data = DaT) +
-		geom_bar( 
-			aes(y = samplePositiveTest, x = yaxis), 
-			width = 0.8, stat = 'identity', fill = 'grey') +
-		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
-			hjust = 0, nudge_y = 1) +
-		facet_wrap(vars(facet_by)) +
-		theme_prj() +
-		theme(strip.text = element_blank(),
-			plot.margin = unit(c(0,5,0,0), 'mm'),
-			axis.line = element_blank(),
-			axis.text = element_blank(),
-			axis.ticks = element_blank(),
-			axis.title.y = element_blank(),) +
-		labs(y = bquote(italic('n')~'tumours')) +
-		coord_flip(clip = 'off')
-	return(barCount)	
+matrix_operation <- function(matrix1, matrix2, operator) {
+  rownames1 <- rownames(matrix1)
+  colnames1 <- colnames(matrix1)
+  rownames2 <- rownames(matrix2)
+  colnames2 <- colnames(matrix2)
+  
+  all_rownames <- unique(c(rownames1, rownames2))
+  all_colnames <- unique(c(colnames1, colnames2))
+  
+  missing_rownames1 <- setdiff(all_rownames, rownames1)
+  missing_rownames2 <- setdiff(all_rownames, rownames2)
+  
+  for (rowname in missing_rownames1) {
+    matrix1 <- rbind(matrix1, matrix(0, ncol(matrix1), 1))
+    rownames(matrix1)[nrow(matrix1)] <- rowname
+  }
+  
+  for (rowname in missing_rownames2) {
+    matrix2 <- rbind(matrix2, matrix(0, ncol(matrix2), 1))
+    rownames(matrix2)[nrow(matrix2)] <- rowname
+  }
+  
+  missing_colnames1 <- setdiff(all_colnames, colnames1)
+  missing_colnames2 <- setdiff(all_colnames, colnames2)
+  
+  for (colname in missing_colnames1) {
+    matrix1 <- cbind(matrix1, matrix(0, nrow(matrix1), 1))
+    colnames(matrix1)[ncol(matrix1)] <- colname
+  }
+  
+  for (colname in missing_colnames2) {
+    matrix2 <- cbind(matrix2, matrix(0, nrow(matrix2), 1))
+    colnames(matrix2)[ncol(matrix2)] <- colname
+  }
+  
+  matrix1 <- matrix1[match(all_rownames, rownames(matrix1)), match(all_colnames, colnames(matrix1))]
+  matrix2 <- matrix2[match(all_rownames, rownames(matrix2)), match(all_colnames, colnames(matrix2))]
+  
+  if (operator == '+'){
+      result <- matrix1 + matrix2
+  }
+  
+  if (operator == '*'){
+      result <- matrix1 * matrix2
+  }
+  
+  rownames(result) <- all_rownames
+  colnames(result) <- all_colnames
+  
+  return(result)
 }
-barCount <- mkCountBar(intClustAUCs[, .SD[1], by = response])
 
-icOut2 <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(6, 0.4))
 
-outfile <- here('output/Danenberg_reproduction/PAMAUCs.pdf')
-save_plot(outfile, icOut2, base_width = 12, base_height = 3)
-
-outfile <- here('output/Method_comparison/logistic_regression/PAMAUCs_reproduction.pdf')
-save_plot(outfile, plot_grid(icOut, icOut2, ncol=1), base_width = 12, base_height = 6)
+result <- matrix_operation(matrix_operation(individualmodelsMatrix, combinedmodelMatrix, '+'), univariatemodelMatrix, '+')
+result <- result[c('ER-HER2+','ER+HER2+','ER-HER2-','ER+HER2-','Normal-like','Basal','HER2', 'Luminal B', 'Luminal A' ),]
 
 ```
+
+```{r}
+library(tidyHeatmap)
+# result <- result[c(response_types),,drop=FALSE]
+
+library(circlize)
+library(viridis)
+col_fun = colorRamp2(c(0, 1,2, 3), c('white', "#FFFF00","#FF8000","#FF0000"))
+
+hm <- Heatmap(t(as.matrix(result)), cluster_columns = F,cluster_rows=T, column_names_gp = gpar(fontsize=8), row_names_gp = gpar(fontsize=3),col = col_fun)
+save_pdf(hm, here('output/Method_comparison/feature_importance/mergedFeatureSelection.pdf'),width=6,height=12)
+```
+```{r}
+saveRDS(result, file = here('scratch/significantFeatures.rds'))
+```
+
+
+
+## Example plots
+Show plots of important features.
+
+```{r}
+densities <- getCellProportionsPerImageAlternative() %>% filter(isTumour == T)
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% (densities %>% pull('ImageNumber')))
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% (densities %>% pull('ImageNumber')))
+```
+
+```{r}
+library(ggpubr)
+library(rstatix)
+library(rlang)
+
+names(density_features) <- gsub('+', 'plus', names(density_features), fixed = T)
+names(density_features) <- gsub('-', 'min', names(density_features), fixed = T)
+
+names(densities) <- gsub('+', 'plus', names(densities), fixed = T)
+names(densities) <- gsub('-', 'min', names(densities), fixed = T)
+
+
+ShowPlot <- function(df, response, feature){
+  d <- merge(df,clinical_data,by.x='ImageNumber', by.y='ImageNumber')
+  
+  print(head(d))
+  
+  d <- d %>% mutate(group = ifelse(PAM50 == response | ER_HER2_status == response, response, paste('no', response) ))
+  
+  p <- ggboxplot(na.omit(d), x = 'group', y = feature) + ylim(0,1) + ylab(gsub('plus', '+', gsub('min', '-', feature, fixed = T), fixed = T))
+  return(p)
+}
+
+ShowPlot(densities, "Basal", "CKplus_ERorHER2plus_cells_CPh")
+```
+
+
+
+```{r}
+library(patchwork)
+
+allParametersAlternative <- getALLParametersAlternative()
+pam_types <- c("Basal","Luminal A","Luminal B","HER2","Normal-like")
+mol_types <- c("ER+HER2-","ER-HER2-","ER+HER2+","ER-HER2+")
+
+retrieveParameters <- function(df, response,feature){
+  d <- merge(df %>% filter(phenotype_combo == feature),clinical_data  %>% select(c(ImageNumber, PAM50, ER_HER2_status)),by.x='tnumber', by.y='ImageNumber')
+
+  d <- d %>% mutate(group = ifelse(PAM50 == response | ER_HER2_status == response, response, paste('no', response) ))
+  
+  mean_d <- d %>% group_by(group) %>% summarise(mean_shape = mean(shape), mean_scale =mean(scale))
+  shape_group <- (mean_d %>% filter(group == response) %>% pull(mean_shape))[[1]]
+  scale_group <-  (mean_d %>% filter(group == response) %>% pull(mean_scale))[[1]]
+  shape_nogroup <- (mean_d %>% filter(group == paste('no', response)) %>% pull(mean_shape))[[1]]
+  scale_nogroup <- (mean_d %>% filter(group == paste('no', response)) %>% pull(mean_scale))[[1]]
+  
+  return(list('shape' = shape_group, 'scale' = scale_group, 'shape_alternative' = shape_nogroup, 'scale_alternative' = scale_nogroup))
+}
+
+
+create_boxplot <- function(df, response,feature){
+  d <- merge(df %>% filter(phenotype_combo == feature),clinical_data  %>% select(c(ImageNumber, PAM50, ER_HER2_status)),by.x='tnumber', by.y='ImageNumber')
+  d <- d %>% mutate(group = ifelse(PAM50 == response | ER_HER2_status == response, response, paste('no', response) ))
+   
+  b1 <- ggplot(na.omit(d)) + geom_boxplot(aes(x=group, y=shape)) + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlim(response, paste('no', response))
+  b2 <- ggplot(na.omit(d)) + geom_boxplot(aes(x=group, y=scale)) + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(response, paste('no', response))
+  
+  return(plot_grid(b1,b2,nrow=1))
+  
+}
+
+showDistanceCurvesPAM <- function(df, response,other_types, feature){
+  g1 <- ggplot() + 
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,response,feature)$shape,scale = retrieveParameters(df,response,feature)$scale), aes(colour=response))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[1]],feature)$shape,scale = retrieveParameters(df,other_types[[1]],feature)$scale), aes(colour=other_types[[1]]))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[2]],feature)$shape,scale = retrieveParameters(df,other_types[[2]],feature)$scale), aes(colour=other_types[[2]]))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[3]],feature)$shape,scale = retrieveParameters(df,other_types[[3]],feature)$scale), aes(colour=other_types[[3]]))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[4]],feature)$shape,scale = retrieveParameters(df,other_types[[4]],feature)$scale), aes(colour=other_types[[4]]))  +
+  xlim(0,600) + theme_bw() + xlab('micron') + ylab('N') + ylim(0,0.035) + ggtitle(feature)
+    
+  b1 <- create_boxplot(df, response,feature)
+  g_total <- g1 + inset_element(b1, 0.4, 0.2, 0.98, 0.98)
+  return(g_total)
+
+  
+}
+
+showDistanceCurvesMS <- function(df, response,other_types, feature){
+  g1 <- ggplot() + 
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,response,feature)$shape,scale = retrieveParameters(df,response,feature)$scale), aes(colour=response))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[1]],feature)$shape,scale = retrieveParameters(df,other_types[[1]],feature)$scale), aes(colour=other_types[[1]]))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[2]],feature)$shape,scale = retrieveParameters(df,other_types[[2]],feature)$scale), aes(colour=other_types[[2]]))  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[3]],feature)$shape,scale = retrieveParameters(df,other_types[[3]],feature)$scale), aes(colour=other_types[[3]]))  +
+  xlim(0,600) + theme_bw() + xlab('micron') + ylab('N') + ylim(0,0.035) + ggtitle(feature)
+    
+  b1 <- create_boxplot(df, response,feature)
+  g_total <- g1 + inset_element(b1, 0.4, 0.2, 0.98, 0.98)
+  return(g_total)
+
+  
+  }
+  
+# Show examples for every subtype
+showDistanceCurvesPAM(allParametersAlternative, 'Basal',setdiff(pam_types,'Basal'),'Endothelial_to_CK+_ERorHER2-_cells')
+
+showDistanceCurvesPAM(allParametersAlternative, 'Luminal A',setdiff(pam_types,'Luminal A'),'Ki67+_cells_to_CKmed_ERorHER2-_cells')
+
+showDistanceCurvesPAM(allParametersAlternative, 'Luminal B',setdiff(pam_types,'Luminal B'),'Ki67+_cells_to_CK+_ERorHER2+_cells')
+
+showDistanceCurvesPAM(allParametersAlternative, 'HER2',setdiff(pam_types,'HER2'),'CK-_cells_to_CK+_ERorHER2+_cells')
+
+showDistanceCurvesPAM(allParametersAlternative, 'Normal-like',setdiff(pam_types,'Normal-like'),'CD38+_cells_to_Myofibroblasts')
+
+showDistanceCurvesMS(allParametersAlternative, 'ER+HER2-', setdiff(mol_types, 'ER+HER2-'),'CK-MHC+_cells_to_Granulocytes_Macrophages')
+
+showDistanceCurvesMS(allParametersAlternative, 'ER-HER2-', setdiff(mol_types, 'ER-HER2-'),'Fibroblasts_to_CK+_ERorHER2+_cells')
+
+showDistanceCurvesMS(allParametersAlternative, 'ER+HER2+', setdiff(mol_types, 'ER+HER2+'),'CD8+_cells_to_B cells')
+
+showDistanceCurvesMS(allParametersAlternative, 'ER-HER2+', setdiff(mol_types, 'ER-HER2+'),'Endothelial_to_Endothelial')
+
+```
+
 
 

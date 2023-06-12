@@ -22,11 +22,13 @@ library(patchwork)
 library(cowplot)
 library(caret)
 library(data.table)
+library(circlize)
+
 
 cells <- getCells()
-cell_counts <- getCellCounts()
+cell_counts <- getCellCounts(cells)
 clinical_data <- getClinical()
-cell_occurences_combinations <- getCombinationCounts()
+cell_occurences_combinations <- getCombinationCounts(cells)
 all_parameters <- getALLParameters()
 
 
@@ -43,30 +45,77 @@ for (i in 1:nrow(settings)){
 }
 
 ggplot(settings,aes(from, to)) + geom_tile(aes(fill=percentage)) + geom_text(aes(label=round(percentage)),size=1) +   scale_fill_gradientn(colours=c("white", "blue"), limits = c(95,100),name='succesful estimation %') + theme_bw()
-ggsave(here('output/Distance_results/Missing_estimations_analysis/matrix.pdf'))
+ggsave(here('output/Distance_results/Missing_estimations_analysis/nbyn_practicalEstimations.pdf'))
 
 
 ```
 
 How many combinations fulfill the min 20 from, 5 to requirement?
 ```{r}
-print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5))/nrow(cell_occurences_combinations)*100)
+print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5)))
+print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5))/nrow(cell_occurences_combinations %>% filter(n_from > 0 & n_to > 0))*100)
 
 ```
-We are not interested in all combinations. How much of the interesting combinations have we estimated?
+## Alternative classification
+What cell types require group lumping?
+
 ```{r}
-cancer_cells <- getTumorAndTMETypes()$tumor_types
-stromal_cells <- c("B cells", "CD4^{+} T cells",  "CD8^{+} T cells",  "Macrophages")
+all_possible_samples <- cell_occurences_combinations %>% filter(n_to >= 5 & n_from >= 20) %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
 
-nrow(all_parameters %>% filter(phenotype_from %in% c(cancer_cells, stromal_cells) & phenotype_to %in% c(cancer_cells,stromal_cells)))/nrow(cell_occurences_combinations  %>% filter(phenotype_from %in% c(cancer_cells, stromal_cells) & phenotype_to %in% c(cancer_cells,stromal_cells) & n_from > 20 & n_to > 5))
+all_possibilities_matrix <- reshape2::dcast(all_possible_samples,phenotype_to  ~ phenotype_from, value.var = 'n')
+rownames(all_possibilities_matrix) <- all_possibilities_matrix %>% pull(phenotype_to)
+all_possibilities_matrix <- all_possibilities_matrix %>% select(-c(phenotype_to))
+all_possibilities_matrix <- all_possibilities_matrix   %>% replace(is.na(.), 0)
+
+library(circlize)
+col_fun = colorRamp2(c(0, 50,51, 794), c("black",'black', "white", "red"))
+
+hm1 <- Heatmap(all_possibilities_matrix, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 6),
+  row_names_gp = grid::gpar(fontsize = 6), column_title = 'phenotype_from', row_title = 'phenotype_to')
+save_pdf(hm1, filename = here('output/Distance_results/Missing_estimations_analysis/fivetwenty_theoreticalEstimations_HM.pdf'),width=7, height=6)
+
+belowHunderedCount <- all_possible_samples %>% mutate(enoughSamples = ifelse(n > 50, T, F)) %>% group_by(phenotype_from) %>% count(enoughSamples) %>% filter(enoughSamples == FALSE) %>% filter(n > round(length(unique(all_possible_samples$phenotype_from))/2)) %>% pull(phenotype_from)
+
+print(belowHunderedCount)
+```
+We come up with a new classification based on the expression profiles as shown by Danenberg et al.
+We follow the following procedure:
+Epithelial cells:
+1. Split in CK+ and CK- cells
+2. Split in surface marker + and -
+
+For the other cells, we merge groups with unique expression  
+
+```{r}
+alternativeClasses = list(# Epithelial
+                          # CK+ cells
+                          'CK+_ERorHER2+_cells'  =  c( "ER^{hi}CXCL12^{+}" , "CK8-18^{+} ER^{hi}","HER2^{+}"),
+                          'CK+_ERorHER2-_cells' = c("CK8-18^{hi}ER^{lo}","CK^{+} CXCL12^{+}","CK8-18^{hi}CXCL12^{hi}","Basal", "CD15^{+}","Ep CD57^{+}"), 
+                          "CKmed_ERorHER2-_cells" = c("CK^{med}ER^{lo}"),
+                          
+                          # CK- cells
+                          "CK-_cells" = c("CK^{lo}ER^{lo}" ,"CK^{lo}ER^{med}" ),
+                          'CK-MHC+_cells' = c("MHC I^{hi}CD57^{+}","MHC I & II^{hi}","MHC^{hi}CD15^{+}"),
+
+                    
+                          # Distinct markers
+                          'Ki67+_cells' = c("Ep Ki67^{+}","Ki67^{+}"),
+                          'CD4+_cells_APCs' = c('CD4^{+} T cells', 'CD4^{+} T cells & APCs'),
+                          'CD8+_cells' = c("CD8^{+} T cells", "T_{Reg} & T_{Ex}"),
+                          'CD38+_cells' = c("CD38^{+} lymphocytes"),
+                          'CD57+_cells' = c("CD57^{+}"),
+                          
+                          'Granulocytes_Macrophages'  = c("Granulocytes", "Macrophages & granulocytes", "Macrophages"),
+                          'Fibroblasts' = c("Fibroblasts","Fibroblasts FSP1^{+}"),
+                          "Myofibroblasts" = c("Myofibroblasts",'Myofibroblasts PDPN^{+}')
+                          )
 
 ```
-
 
 
 Can we improve this number with alternative classification?
 ```{r}
-
 alternativeClassification <- function(mergelist,removelist){
   names <- names(mergelist)
   for (m in 1:length(mergelist)){
@@ -102,49 +151,74 @@ getCombinationCounts <- function(cellcounts){
   
 }
 
+testMerge <- function(merge, remove){
+  df <- getCombinationCounts(alternativeClassification(merge,remove))
+  dfCounts <- df  %>% filter(n_from >= 5 & n_to >= 20) %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+  
+
+  all_possibilities_matrix <- reshape2::dcast(dfCounts,phenotype_to  ~ phenotype_from, value.var = 'n')
+  rownames(all_possibilities_matrix) <- all_possibilities_matrix %>% pull(phenotype_to)
+  all_possibilities_matrix <- all_possibilities_matrix %>% select(-c(phenotype_to))
+  all_possibilities_matrix <- all_possibilities_matrix   %>% replace(is.na(.), 0)
+  
+  col_fun = colorRamp2(c(0, 100,101, 794), c("black",'black', "white", "red"))
+  
+
+  hm1 <- Heatmap(all_possibilities_matrix, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 6),
+    row_names_gp = grid::gpar(fontsize = 6), column_title = 'phenotype_from', row_title = 'phenotype_to')
+  save_pdf(hm1, filename = here('output/Distance_results/Missing_estimations_analysis/ImprovedsignificantSampleCountHM.pdf'),width=7, height=6)
+  
+
+  
+  belowHunderedCount <- dfCounts %>% mutate(enoughSamples = ifelse(n > 100, T, F)) %>% group_by(phenotype_from) %>% count(enoughSamples) %>% filter(enoughSamples == F) %>% filter(n > round(length(unique(dfCounts$phenotype_from))/2)) %>% pull(phenotype_from)
+
+return(belowHunderedCount)
+  
+}
+
+print(testMerge(alternativeClasses, list()))
+
+
+```
+```{r}
+
 testMerge <- function(merge,remove){
   df <- getCombinationCounts(alternativeClassification(merge,remove))
   print('percentage of combinations that fulfill 20-5 criteria')
-  print(nrow(df %>% filter(n_from >= 20 & n_to >= 5))/nrow(df)*100)
+  print(nrow(df %>% filter(n_from >= 20 & n_to >= 20))/nrow(df  %>% filter(n_from > 0 & n_to > 0))*100)
   print('instead of: ')
-  print(nrow(cell_occurences_combinations %>% filter(n_from >= 20 & n_to >= 5))/nrow(cell_occurences_combinations)*100)
+  print(nrow(cell_occurences_combinations %>%  filter(n_from >= 20 & n_to >= 20))/nrow(cell_occurences_combinations %>% filter(n_from > 0 & n_to > 0))*100)
 }
 
+testMerge(alternativeClasses, list())
 
-tumorTME <- list(tumor = getTumorAndTMETypes()$tumor_types)
-alternative2 <- list(MHC = grep('MHC', unique(cells$meta_description), value=T, fixed=T), ER =  c( "ER^{hi}CXCL12^{+}" , "CK8-18^{+} ER^{hi}", "CK^{lo}ER^{med}"), otherCancer = c( "CK^{med}ER^{lo}", "CK^{+} CXCL12^{+}", "CK8-18^{hi}CXCL12^{hi}","CK8-18^{hi}ER^{lo}" ))
-
-testMerge(alternative2, c("CK^{lo}ER^{lo}", "CD15^{+}",  "Ep Ki67^{+}", "Ki67^{+}","Macrophages & granulocytes"))
 ```
-```{r}
-all_possible_samples <- cell_occurences_combinations %>% filter(n_to >= 5 & n_from >= 20) %>% dplyr::count(phenotype_combo) %>%
-  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
-
-print(nrow(cell_occurences_combinations %>% filter(n_to >= 5 & n_from >= 20)))
-
-ggplot(data=(all_possible_samples %>% mutate(n_p = (n/794) * 100))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=n_p)) + geom_text(aes(x=phenotype_from, y=phenotype_to, label=n),size=1,color='white') +   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
-ggsave(here('output/Distance_results/Missing_estimations_analysis/allpossibleHM.pdf'),width=7,height=6)
-
-alternative_combination_count <- getCombinationCounts(alternativeClassification(alternative2,list()))
-
-print(nrow(alternative_combination_count %>% filter(n_to >= 5 & n_from >= 20)))
-
-alternative_possibilities_counts <- alternative_combination_count %>% filter(n_to >= 5 & n_from >= 20) %>% dplyr::count(phenotype_combo)  %>%
-  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
-
-ggplot(data=(alternative_possibilities_counts  %>% mutate(n_p = (n/794)*100))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=n_p)) + geom_text(aes(x=phenotype_from, y=phenotype_to, label=n),size=1,color='white') +   
-         theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
-ggsave(here('output/Distance_results/Missing_estimations_analysis/allpossibleHM_withalternativeClustering.pdf'),width=7,height=6)
-```
+Add new cell type labels
 
 ```{r}
-cell_counts_alternative <- alternativeClassification(alternative2)
-total <- cell_counts_alternative %>% mutate(type = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, 'epi', 'TME')) %>% group_by(tnumber, type) %>% summarise(total_n = sum(n))
-total <- dcast(total, tnumber ~ type)
-cell_counts_alternative <- merge(cell_counts_alternative, total, by='tnumber',all.x=T)
-cell_counts_alternative <- cell_counts_alternative %>% mutate(percentage = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, n/epi, n/TME))
+changeCellsDF <- function(cells, alternative_classes){
+    cells <- cells %>% mutate(original_meta_description = meta_description)
 
-ggplot(cell_counts_alternative %>% filter(percentage > 0.05) %>% mutate(n = ifelse(n > 200, 200, n))) + geom_histogram(aes(x=percentage),binwidth = 0.05) + facet_wrap(vars(meta_description)) + theme_bw() + xlab('proportion epithelial or TME')
-ggsave(here('output/Data_exploration/alternativecellproportionsHistograms.pdf'),height=15,width=20)
+    names <- names(alternative_classes)
+    for (m in 1:length(alternative_classes)){
+        cells <- cells %>% mutate(meta_description = ifelse(meta_description %in% alternative_classes[[m]], names[[m]], meta_description))
+  }
+    
+  return(cells)
+  
+}
+
+cells_v2 <- changeCellsDF(getCells(), alternativeClasses)
+
+cells_v2 %>% count(meta_description)
+
+
+write_fst(cells_v2, here('DATA/SingleCells_altered.fst'))
 ```
+```{r}
+
+
+```
+
 

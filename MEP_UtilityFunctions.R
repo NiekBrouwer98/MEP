@@ -1,12 +1,12 @@
 # This file contains all functions that are used over multiple notebooks
 source(here("UtilityFunctions.R"))
 library(tidyverse)
-cells <- getCells()
 
 #'Print slide of given sample
 #'
 #'@return slide with highlighted cell type(s) and all cell types
 show_slide <- function(sample_number, highlight_A){
+  cells <- getCells()
   slide_1 <- ggplot(data=cells%>% filter(ImageNumber == sample_number) %>% mutate(type = ifelse(meta_description %in% highlight_A, 'highlighted', 'other'))) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=type), alpha =0.5) +
     theme_bw() + ggtitle(paste('imagenumber: ', sample_number))
   
@@ -20,18 +20,19 @@ show_slide <- function(sample_number, highlight_A){
 #'Print slide and distance distribution of given sample
 #'
 #'@return grid of two plots
-show_distance_distribution <- function(sample, ylimit=0.02){
-  sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
+show_distance_distribution <- function(cells, distance_data, sample, ylimit=0.02){
+  sample_distance_data <- merge(x = distance_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
                                                                                                             sample$phenotype_combo),
-                                y = sample %>% select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+                                y = sample %>% dplyr::select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
   
   dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) + geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5) +
     stat_function(fun = dweibull, args = list(shape = sample['shape'][[1]], scale = sample['scale'][[1]]))+
     xlim(0,300) + ylim(0,ylimit) + theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
   
-  slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
-                    filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]])) + 
-    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) +
+  df <- cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
+    filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]]) %>% mutate(label = ifelse(meta_description == sample['phenotype_from'][[1]] , 'FROM', 'TO'))
+  slide <- ggplot(data=df) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=label), alpha =0.5) +
     theme_bw() + ggtitle(paste('imagenumber: ', sample['tnumber'][[1]]))
   
   return(plot_grid(dist, slide,ncol=2))
@@ -65,88 +66,6 @@ generate_matrix <- function(df, col_rownames ,subselection=NULL, NA_percentage=0
   
   return(m)
 }
-
-#' The first parameter estimation was done with thresholds [0,20,50,70,100]
-#' The second parameter estimation was done with thresholds [0,2,5,10,20]
-#' Merge the two estimations
-#' @return Save parameter file in scratch dir
-CompileALLParameters <- function(){
-  get_parameters <- function(path){
-    params <- c()
-    files <- list.files(path)
-    for (f in files){
-      tryCatch({
-        success_model <- readRDS(paste(path,f,sep=''))
-        params <- append(params, list(success_model[[3]]))
-        name <- gsub('success_models_','',f)
-        name <- gsub('.rds','',name)
-        names(params)[length(params)] <- name
-      },error=function(e){print(e)}, warning=function(w){print(w)})
-      
-    }
-    params_result <- bind_rows(params, .id='phenotype_combo')
-    return(params_result)
-  }
-  
-  get_all_parameters <- function(save){
-    all_parameters_firstrun <- get_parameters(here('scratch/success_models/')) %>%
-      separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
-      filter(a > 0.5) %>%
-      filter(b > 8) %>%
-      rename(shape =a , scale = b) %>%
-      unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
-    
-    all_parameters_secondrun <- get_parameters(here('scratch/success_models_secondrun/')) %>%
-      separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
-      filter(a > 0.5) %>%
-      filter(b > 8) %>%
-      rename(shape =a , scale = b) %>%
-      unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
-    
-    #Bind both results
-    all_parameters <- rbind(all_parameters_secondrun, all_parameters_firstrun %>% filter(! unique_sample %in% all_parameters_secondrun$unique_sample))
-    if(save){
-      saveRDS(all_parameters, file = here('scratch/all_parameters.rds'))
-    }
-    return(all_parameters)
-  }
-  
-  all_parameters <- get_all_parameters(save=TRUE)
-  
-}
-
-
-
-transform_parameters_to_matrix <- function(outliers = TRUE){
-  if (outliers == TRUE){
-    all_parameters <- getALLParameters()
-    
-  }else{
-    all_parameters <- readRDS(here('scratch/all_parameters_withoutOutliers.rds'))
-  }
-  shape_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
-  scale_parameters <- tibble(tnumber = unique(all_parameters$tnumber))
-  
-  for (c in unique(all_parameters$phenotype_combo)){
-    shape_parameters <- left_join(x = shape_parameters, y= all_parameters %>% 
-                                    select(c(tnumber, phenotype_combo, shape)) %>% 
-                                    filter(phenotype_combo == c),
-                                  by='tnumber') %>%
-      select(-c(phenotype_combo))
-    names(shape_parameters)[names(shape_parameters) == 'shape'] = c
-    
-    scale_parameters <- left_join(x = scale_parameters, y= all_parameters %>% 
-                                    select(c(tnumber, phenotype_combo, scale)) %>% 
-                                    filter(phenotype_combo == c),
-                                  by='tnumber') %>%
-      select(-c(phenotype_combo))
-    names(scale_parameters)[names(scale_parameters) == 'scale'] = c
-  }
-  
-  saveRDS(shape_parameters, here('scratch/features/shape_parameters.rds'))
-  saveRDS(scale_parameters, here('scratch/features/scale_parameters.rds'))
-}
-
 
 addLabelToGrid <- function(plotGrid, title){
   title <- ggdraw() + 
@@ -183,12 +102,12 @@ getNetworkFeatures <- function(){
 }
 
 getScaleFeatures <- function(){
-  s <- readRDS(here('scratch/features/scale_parameters.rds'))
+  s <- readRDS(here('scratch/features/scale_parameters_run1.rds'))
   return(s)
 }
 
 getShapeFeatures <- function(){
-  s <- readRDS(here('scratch/features/shape_parameters.rds'))
+  s <- readRDS(here('scratch/features/shape_parameters_run1.rds'))
   return(s)
 }
 
@@ -207,10 +126,10 @@ getCellProportionsPerImage <- function(){
   return(s)
 }
 
-getCellCounts <- function(){
-  cell_counts <- cells %>% select(c(ImageNumber, meta_description)) %>%
+getCellCounts <- function(cells){
+  cell_counts <- cells %>% dplyr::select(c(ImageNumber, meta_description)) %>%
     dplyr::count(ImageNumber, meta_description)  %>%
-    rename(tnumber=ImageNumber)
+    dplyr::rename(tnumber=ImageNumber)
   
   expand_cell_counts <- cell_counts %>% tidyr::expand(tnumber,meta_description)
   
@@ -220,13 +139,13 @@ getCellCounts <- function(){
   return(cell_counts)
 }
 
-getCombinationCounts <- function(){
-  cell_counts_to <- getCellCounts() %>% rename(n_to = n)
-  cell_counts_from <- getCellCounts() %>% rename(n_from = n)
+getCombinationCounts <- function(cells){
+  cell_counts_to <- getCellCounts(cells) %>% dplyr::rename(n_to = n)
+  cell_counts_from <- getCellCounts(cells) %>% dplyr::rename(n_from = n)
   
   expand_cell_combinations <- cell_counts_to %>% tidyr::expand(tnumber, meta_description, meta_description) %>% 
-    rename(phenotype_from = meta_description...2) %>% 
-    rename(phenotype_to = meta_description...3)
+    dplyr::rename(phenotype_from = meta_description...2) %>% 
+    dplyr::rename(phenotype_to = meta_description...3)
   
   combination_counts <- merge(expand_cell_combinations, cell_counts_from, by.x=c('tnumber', 'phenotype_from'), by.y=c('tnumber', 'meta_description'))
   combination_counts <- merge(combination_counts, cell_counts_to, by.x= c('tnumber', 'phenotype_to'), by.y=c('tnumber', 'meta_description'))
@@ -238,6 +157,7 @@ getCombinationCounts <- function(){
 }
 
 getTumorAndTMETypes <- function(){
+  cells <- getCells()
   TME =  c("B cells","CD38^{+} lymphocytes","CD4^{+} T cells","CD4^{+} T cells & APCs","CD57^{+}","CD8^{+} T cells","Endothelial","Fibroblasts","Fibroblasts FSP1^{+}","Granulocytes", "Ki67^{+}","Macrophages","Macrophages & granulocytes", "Myofibroblasts","Myofibroblasts PDPN^{+}", "T_{Reg} & T_{Ex}")
   tumor = setdiff(unique(cells %>% pull(meta_description)), TME)
   
@@ -257,4 +177,45 @@ getALLParameters <- function(){
 getOutliers <- function(){
   outliers <- read_rds(here('scratch/outlier_parameters.rds'))
   reutrn(outliers)
+}
+
+getNonTumourImages <- function(){
+  cells <- getCells()
+  return(unique(cells %>% filter(isTumour == F) %>% pull(ImageNumber)))
+}
+
+getCellsAlternative <- function(){
+  cells <- read_fst(here('DATA/SingleCells_altered.fst'), as.data.table = T)
+  return(cells)
+}
+
+getCombinationsAlternative <- function(){
+  combinations <- readRDS(here('scratch/combinations_selection_run2.rds'))
+  return(combinations)
+}
+
+getALLParametersAlternative <- function(){
+  all_parameters <- read_rds(here('scratch/all_parameters_run2.rds'))
+  return(all_parameters)
+  
+}
+
+getScaleFeaturesAlternative <- function(){
+  s <- readRDS(here('scratch/features/scale_parameters_run2.rds'))
+  return(s)
+}
+
+getShapeFeaturesAlternative <- function(){
+  s <- readRDS(here('scratch/features/shape_parameters_run2.rds'))
+  return(s)
+}
+
+getDensityFeaturesAlternative <- function(){
+  s <- readRDS(here('scratch/features/cell_counts_per_imageAlternative.rds'))
+  return(s)
+}
+
+getCellProportionsPerImageAlternative <- function(){
+  s <- readRDS(here('scratch/features/cell_proportions_per_imageAlternative.rds'))
+  return(s)
 }

@@ -14,6 +14,6 @@ median_distances <- foreach(c= 1:length(combinations), .combine = 'rbind') %dopa
     
   }
   distances <- all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
-                                                                          sample$phenotype_combo),
+                                                                          sample$phenotype_combo)
 }
 

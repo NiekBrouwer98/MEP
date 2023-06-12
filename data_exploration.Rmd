@@ -17,8 +17,8 @@ params:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+## Data exploration
 In this document we explore the METABRIC dataset.
-
 
 ```{r, include=FALSE}
 library(ComplexHeatmap)
@@ -35,8 +35,9 @@ library(caret)
 library(data.table)
 
 cells <- getCells()
-
-cell_counts <- getCellCounts()
+cell_counts <- getCellCounts(cells)
+clinical_data <- getClinical()
+cell_occurences_combinations <- getCombinationCounts(cells)
 ```
 
 ## Basic information
@@ -44,10 +45,9 @@ cell_counts <- getCellCounts()
 ```{r}
 print(paste('Number of samples: ', length(unique(cells$ImageNumber))))
 print(paste('Number of cell types: ', length(unique(cells$meta_description))))
+```
 
-paste('Cell types:')
-print(unique(cells$meta_description))
-
+```{r}
 ggplot(data= cells %>% count(ImageNumber)) + geom_bar(aes(y=n, x=ImageNumber), stat='identity') + theme_bw() + ggtitle('Total counts per sample')
 
 if (params$save_files){
@@ -62,15 +62,14 @@ ggsave(paste(here('output/Data_exploration/'),'samplecounts.pdf', sep=''))
 }
 
 
-cell_occurences <- merge(cell_counts %>% expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>%
+cell_occurences <- merge(cell_counts %>% tidyr::expand(tnumber, meta_description), cell_counts, by = c('tnumber','meta_description'), all.x = TRUE) %>%
                   mutate(n = coalesce(n, 0)) %>%
-                  mutate(category = ifelse(n==0,'0', ifelse(n<10, '0<10', ifelse(n<50,'10<50','>50')))) %>% group_by(meta_description) %>%
+                  mutate(category = ifelse(n==0,'0', ifelse(n<5, '0-5', ifelse(n<20,'5-20',ifelse(n<50, '20-50','>50'))))) %>% group_by(meta_description) %>%
                   count(category)
 
 lvls <- cell_occurences %>% filter(category == '0') %>% arrange(desc(n)) %>% pull(meta_description)
 
-#Haakje: Zijn de samples met hoge counts in cell types met veel 0 counts, verrijkt in bepaaplde subtypes of iets dergelijks?
-ggplot(cell_occurences, aes(x=factor(meta_description, level = lvls), y=n, fill=factor(category, levels=c('>50','10<50','0<10','0')))) + 
+ggplot(cell_occurences, aes(x=factor(meta_description, level = lvls), y=n, fill=factor(category, levels=c('>50','20-50','5-20','0-5','0')))) + 
     geom_bar(position="fill", stat="identity") + theme_bw()  +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
   ggtitle('Cell type counts in samples') + ylab('proportion') + xlab('')+ guides(fill=guide_legend(title="occurences"))
@@ -79,8 +78,25 @@ if (params$save_files){
 ggsave(paste(here('output/Data_exploration/'),'celltypecounts.pdf', sep=''))
 }
 
-```
+# merge1 <- c('MHC I^{hi}CD57^{+}', 'MHC^{hi}CD15^{+}', 'MHC I & II^{hi}')
+# merge2 <- c('ER^{hi}CXCL12^{+}', 'CK8−18^{+} ER^{hi}')
+# merge3 <- c(getTumorAndTMETypes()$tumor_types)
+# merged_cell_counts <- cell_counts %>% mutate('merged_celltype' = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, 'tumor', meta_description)) %>% group_by(tnumber, merged_celltype) %>% summarise(across(c(n), sum))
+# 
+# cell_occurences <- merge(merged_cell_counts %>% tidyr::expand(merged_celltype), merged_cell_counts, by = c('tnumber','merged_celltype'), all.x = TRUE) %>%
+#                   mutate(n = coalesce(n, 0)) %>%
+#                   mutate(category = ifelse(n==0,'0', ifelse(n<5, '0-5', ifelse(n<20,'5-20',ifelse(n<50, '20-50','>50'))))) %>% group_by(merged_celltype) %>%
+#                   count(category)
+# 
+# lvls <- cell_occurences %>% filter(category == '0') %>% arrange(desc(n)) %>% pull(merged_celltype)
+# 
+# ggplot(cell_occurences, aes(x=factor(merged_celltype, level = lvls), y=n, fill=factor(category, levels=c('>50','20-50','5-20','0-5','0')))) + 
+#     geom_bar(position="fill", stat="identity") + theme_bw()  +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+#   ggtitle('Cell type counts in samples') + ylab('proportion') + xlab('')+ guides(fill=guide_legend(title="occurences"))
 
+```
+### Compare figures to NABUCCO data.
 Images from the METABRIC cohort are small compared to the NABUCCO data and therefore have a lower cell count.
 
 ```{r}
@@ -117,13 +133,28 @@ ggsave(paste(here('output/Data_exploration/'),'NABUCCO_celltypecounts.pdf', sep=
 
 ```
 
-## Cell type occurences
+## Tumor cell specifity
+```{r}
+total <- cell_counts %>% mutate(type = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, 'epi', 'TME')) %>% group_by(tnumber, type) %>% summarise(total_n = sum(n))
+total <- dcast(total, tnumber ~ type)
+cell_counts <- merge(cell_counts, total, by='tnumber',all.x=T)
+cell_counts <- cell_counts %>% mutate(percentage = ifelse(meta_description %in% getTumorAndTMETypes()$tumor_types, n/epi, n/TME))
+
+ggplot(cell_counts %>% filter(meta_description == "Basal" & percentage > 0.05)) + geom_histogram(aes(x=percentage),binwidth = 0.05)
+
+ggplot(cell_counts %>% filter(n > 0) %>% mutate(n = ifelse(n > 200, 200, n))) + geom_histogram(aes(x=n),binwidth = 5) + facet_wrap(vars(meta_description))
+ggsave(here('output/Data_exploration/cellCountsHistograms.pdf'),height=15,width=20)
+
+ggplot(cell_counts %>% filter(percentage > 0.05) %>% mutate(n = ifelse(n > 200, 200, n))) + geom_histogram(aes(x=percentage),binwidth = 0.05) + facet_wrap(vars(meta_description)) + theme_bw() + xlab('proportion epithelial or TME')
+ggsave(here('output/Data_exploration/cellproportionsHistograms.pdf'),height=15,width=20)
+```
+
+
+## Cell type combinations
 In future steps we are going to estimate distances between cell type combinations. Not every combination is present in every sample however.
 We have a large sample size and this possibly compensates for the low cell type count. Cell types that are too rare cannot be considered.
 
 ```{r}
-cell_occurences_combinations <- getCombinationCounts()
-
 print(paste('number of samples that cannot be estimated: ', nrow(cell_occurences_combinations %>% filter(n_from == 0 | n_to ==0))))
 
 heatmap_occurences <- function(dataset, occ_number){
@@ -150,7 +181,8 @@ heatmap_occurences(cell_occurences_combinations, 10)
 heatmap_occurences(cell_occurences_combinations, 20)
 
 ```
-Look in each subtype.
+
+Look in PAM50 subtypes.
 
 ```{r}
 cell_occurences_combinations <- getCombinationCounts()
@@ -171,10 +203,10 @@ heatmap_occurences <- function(dataset, occ_number, subtype){
 }
 
 heatmap_occurences(cell_occurences_combinations, 0,'ALL')
-subtypes = group_split(clinical_data %>% group_by(`Pam50 + Claudin-low subtype`))
+subtypes = group_split(clinical_data %>% group_by(PAM50))
 for (s in 1:length(subtypes)){
   subtype = subtypes[[s]]
-  heatmap_occurences(cell_occurences_combinations %>% filter(tnumber %in% subtype$ImageNumber), 0,unique(subtype$`Pam50 + Claudin-low subtype`))
+  heatmap_occurences(cell_occurences_combinations %>% filter(tnumber %in% subtype$ImageNumber), 0,unique(subtype$PAM50))
 }
 
 ```
@@ -206,85 +238,73 @@ ggsave(here('output/Data_exploration/occurence_slope.pdf'))
 
 ```
 
+Since there are many cell types, not all combinations are present in all slides. Some combinations have to be analysed in a subset of the images.
+
+```{r}
+cell_occurences_categories <- cell_occurences_combinations %>% mutate(category = ifelse(n_to > 5 & n_from> 20, 'from20to5', 'fewer')) %>%
+                                                                     group_by(phenotype_from, phenotype_to) %>% dplyr::count(category) %>% mutate(n = n/794)
+
+df <- cell_occurences_categories %>% filter(category == 'from20to5')
+
+trans_df <- xtabs(n ~ phenotype_from + phenotype_to, df)
+hm <- Heatmap(trans_df, cluster_rows = T, cluster_columns = T, row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6),
+              name = paste('sample percentage \n with', 'from20to5', 'occ.'), column_title = 'phenotype_to', row_title = 'phenotype_from')
+
+print(hm)
+
+save_pdf(hm, paste(here('output/Data_exploration/'), 'from20to5', 'plus_occurences_heatmap.pdf', sep=''), width=6, height=4)
+
+```
+
+
+
 ## Clinical data
 Look at the distribution of breast cancer subtypes.
 
 ```{r}
 clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
-clinical_data_ext <- read_tsv(here('DATA/brca_metabric_clinical_data.tsv'))
-clinical_data_Rueda <- read.delim(here('DATA/41586_2019_1007_MOESM8_ESM.txt')) #https://www-nature-com.tudelft.idm.oclc.org/articles/s41586-019-1007-8#MOESM7
+clinical_data_ext <- read_tsv(here('DATA/brca_metabric_clinical_data.tsv')) %>% select(c(`Patient ID`, `ER Status`, `ER status measured by IHC`,`HER2 Status`, `PR Status`, `3-Gene classifier subtype`)) #https://www.cbioportal.org/study/clinicalData?id=brca_metabric
+#https://pubmed-ncbi-nlm-nih-gov.tudelft.idm.oclc.org/27161491/
+  
+clinical_data_Rueda <- read.delim(here('DATA/41586_2019_1007_MOESM8_ESM.txt')) %>% select(c(`METABRIC.ID`, `ER.Expr`, `PR.Expr`, `Her2.Expr`)) #https://www-nature-com.tudelft.idm.oclc.org/articles/s41586-019-1007-8#MOESM7
+
+all_clinical_data <- merge(merge(merge(tibble(metabric_id = unique(cells$metabric_id)), clinical_data, by='metabric_id', all.x=T), clinical_data_ext, by.x = 'metabric_id', by.y='Patient ID',all.x=T), clinical_data_Rueda, by.x='metabric_id', by.y='METABRIC.ID',all.x=T)
 
 contingency_table <- function(feature1, feature2){
-  clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
-                         clinical_data_ext %>% select(c('Sample ID', feature2)), by.x='metabric_id', by.y='Sample ID',
-                         all.x=T)
+  clinical_data <- merge(all_clinical_data %>% dplyr::select(c('metabric_id', feature1)),
+                         all_clinical_data %>% dplyr::select(c('metabric_id', feature2)), by='metabric_id',all.x=T)
 
-table(clinical_data[,2], clinical_data[,3])
+  table(clinical_data[,2], clinical_data[,3])
   
 }
 
 order <- tibble(intclust = c("IntClust 1", "IntClust 2",  "IntClust 3",  "IntClust 4-", "IntClust 4+", "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8", "IntClust 9",  "IntClust 10"))
 
 # Contingency tables
-contingency_table('PAM50',"Pam50 + Claudin-low subtype")
-contingency_table('PAM50',"3-Gene classifier subtype" )
-contingency_table('IntClust',"Integrative Cluster" )
-contingency_table('ERStatus',"ER Status" )
-contingency_table('ERStatus',"ER status measured by IHC" )
+contingency_table('HER2 Status',"Her2.Expr" )
+contingency_table('ER Status',"ER.Expr" )
+contingency_table('PR Status',"PR.Expr" )
+# These columns are the same so can be removed
+all_clinical_data <- all_clinical_data %>% select(-c(`ER.Expr`, `PR.Expr`, `Her2.Expr`))
+contingency_table('ERStatus', 'ER status measured by IHC')
+# These columns are also the same
+all_clinical_data <- all_clinical_data %>% select(-c(`ERStatus`))
+contingency_table("3-Gene classifier subtype", 'HER2 Status')
+contingency_table('PAM50', 'ER Status')
+contingency_table('PAM50', 'HER2 Status')
+contingency_table('PAM50', 'PR Status')
+
+all_clinical_data <- all_clinical_data %>% mutate(ER_HER2_status = ifelse(`ER Status` == 'Positive' & `HER2 Status` =='Positive', 'ER+HER2+', ifelse(`ER Status` == 'Positive' & `HER2 Status` =='Negative', 'ER+HER2-', ifelse(`ER Status` == 'Negative' &`HER2 Status` == 'Positive', 'ER-HER2+', 'ER-HER2-'))))
+
+write_csv(all_clinical_data, here('DATA/ClinicalMerged.csv'))
 
 
-contingency_table_withindata <- function(feature1, feature2){
-  clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
-                         clinical_data %>% select(c('metabric_id', feature2)), by.x='metabric_id', by.y='metabric_id',
-                         all.x=T)
-table(clinical_data[,2], clinical_data[,3])
-  
-}
-contingency_table_withindata('PAM50',"ERStatus" )
-
-contingency_table_Rueda <- function(feature1, feature2){
-  clinical_data <- merge(clinical_data %>% select(c('metabric_id', feature1)),
-                         clinical_data_Rueda %>% select(c('METABRIC.ID', feature2)), by.x='metabric_id', by.y='METABRIC.ID',
-                         all.x=T)
-table(clinical_data[,2], clinical_data[,3])
-  
-}
-
-contingency_table_Rueda('PAM50', "Pam50Subtype" )
-contingency_table_Rueda('IntClust',"iC10" )
-contingency_table_Rueda('ERStatus',"ER.Expr")
-contingency_table_Rueda('ERStatus',"ER.Status")
-
-
-
-# Intclust composition
-order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"PR Status" )),by.x='intclust',by.y='row.names') %>% rename('PR_positive' = 'Positive', 'PR_negative' = 'Negative')
-order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"ER Status" )),by.x='intclust',by.y='row.names') %>% rename('ER_positive' = 'Positive', 'ER_negative' = 'Negative')
-order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"HER2 Status" )),by.x='intclust',by.y='row.names') %>% rename('HER2_positive' = 'Positive', 'HER2_negative' = 'Negative')
-melt_order <- reshape2::melt(order, id=c('intclust'))
-
-ggplot(data=melt_order %>% filter(variable=='HER2_positive' | variable=='HER2_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('HER2 counts in Intclusts')
-
-ggplot(data=melt_order %>% filter(variable=='ER_positive' | variable=='ER_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('ER counts in Intclusts')
-
-ggplot(data=melt_order %>% filter(variable=='PR_positive' | variable=='PR_negative')) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('PR counts in Intclusts')
-
-order <- tibble(intclust = c("IntClust 1", "IntClust 2",  "IntClust 3",  "IntClust 4-", "IntClust 4+", "IntClust 5-", "IntClust 5+", "IntClust 6",  "IntClust 7", "IntClust 8", "IntClust 9",  "IntClust 10"))
-
-order <- merge(order, as.data.frame.matrix(contingency_table('IntClust',"Pam50 + Claudin-low subtype" )),by.x='intclust',by.y='row.names')
-melt_order <- reshape2::melt(order, id=c('intclust'))
-ggplot(data=melt_order) + geom_col(aes(x=intclust, y=value,fill=variable),stat='identity',position='fill') + theme_bw()  +
-  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('PAM50 + claudin-low counts in Intclusts')
+ggplot(all_clinical_data) + geom_bar(aes(x=PAM50, fill=`ER_HER2_status`)) + theme_bw() + ggtitle('ER and HER2 status in PAM50 subtypes')
+ggsave(here('output/Data_exploration/ERHER2statusInPAM50.pdf'),width=8,heigh=6)
 
 # subtypes in data
-ggplot(data = clinical_data) + geom_bar(aes(x=PAM50)) + theme_bw() + ggtitle('breast cancer subtype occurences')
-
-if (params$save_files){
-ggsave(here('output/Data_exploration/subtypes.pdf'))
-}
+ggplot(all_clinical_data) + geom_bar(aes(x=PAM50)) + theme_bw() + ggtitle('PAM50 subtype occurences')
+ggsave(here('output/Data_exploration/PAM50subtypes.pdf'),width=8,heigh=6)
 
 ```
 
@@ -302,10 +322,24 @@ for (s in samples){
   print(show_slide(s, tumor))
 }
 
-i = 1
+i = 2
 print(show_slide(i,tumor))
 ggsave(paste('output/Slides/exploreslide_',i,'.pdf',sep=''), width = 15, height=10)
 ```
+
+```{r}
+img_number <- cell_counts %>% filter(meta_description == "Ep CD57^{+}" & n >25)  %>% pull(tnumber)
+show_slide(sample(img_number,1),"Ep CD57^{+}" )
+```
+## Slide heterogeneity
+```{r}
+print(paste('All images:', length(unique(cells %>% pull(ImageNumber))), 'of', length(unique(cells %>% pull(metabric_id))), 'patients'))
+print(paste('Images with tumor tissue:', length(unique(cells %>% filter(isTumour==T) %>% pull(ImageNumber))), 'of', length(unique(cells %>% filter(isTumour==T)  %>% pull(metabric_id))), 'patients'))
+print(paste('Images from normal tissue:', length(unique(cells %>% filter(is_normal == 1) %>% pull(ImageNumber))), 'of', length(unique(cells %>% filter(is_normal == 1) %>% pull(metabric_id))), 'patients'))
+print(paste('in situ carcinoma tissue:', length(unique(cells %>% filter(is_dcis == 1) %>% pull(ImageNumber))), 'of', length(unique(cells %>% filter(is_dcis == 1) %>% pull(metabric_id))), 'patients'))
+
+```
+
 
 ## Expression data
 Cell types are classified based on expression profiles.
@@ -316,15 +350,37 @@ expression_profiles_summary <- as.data.frame(cells %>% group_by(meta_description
   summarise_at(vars("Histone H3":"DNA2"), mean))
 rownames(expression_profiles_summary) <- expression_profiles_summary$meta_description
 expression_profiles_summary <- scale(subset(expression_profiles_summary, select=-c(meta_description)))
+
+expression_profiles_summary <- expression_profiles_summary[c(getTumorAndTMETypes()$tumor_types, getTumorAndTMETypes()$TME_types), ]
+
+rows <- rowAnnotation(type = c(rep('Epithelial',16), rep('TME',16)))
   
 hm <- Heatmap(expression_profiles_summary, name = 'mean expression', column_title = 'protein', row_title = 'cell type',
-        row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), cluster_rows = T, cluster_columns =  T)
+        row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), cluster_rows = F, cluster_columns =  F, right_annotation  = rows)
 
 print(hm)
 
-if (params$save_files){
 save_pdf(hm, here('output/Data_exploration/expression_profiles.pdf'), width=6, height=4)
-}
+```
+
+```{r}
+cellsAlternative <- getCellsAlternative()
+
+expression_profiles_summary <- as.data.frame(cellsAlternative %>% group_by(meta_description)  %>% 
+  summarise_at(vars("Histone H3":"DNA2"), mean))
+rownames(expression_profiles_summary) <- expression_profiles_summary$meta_description
+expression_profiles_summary <- scale(subset(expression_profiles_summary, select=-c(meta_description)))
+
+expression_profiles_summary <- expression_profiles_summary[c(c("CK+_ERorHER2+_cells","CK+_ERorHER2-_cells","CK-MHC+_cells","CK-_cells", "CKmed_ERorHER2-_cells"), setdiff(rownames(expression_profiles_summary),c("CK+_ERorHER2+_cells","CK+_ERorHER2-_cells","CK-MHC+_cells","CK-_cells", "CKmed_ERorHER2-_cells"))), ]
+
+rows <- rowAnnotation(type = c(rep('epithelial',5), rep('TME',10)))
+  
+hm <- Heatmap(expression_profiles_summary, name = 'mean expression', column_title = 'protein', row_title = 'cell type',
+        row_names_gp = gpar(fontsize=6), column_names_gp = gpar(fontsize=6), cluster_rows = F, cluster_columns =  F, right_annotation  = rows)
+
+print(hm)
+
+save_pdf(hm, here('output/Data_exploration/expression_profiles_alternative.pdf'), width=6, height=4)
 ```
 
 

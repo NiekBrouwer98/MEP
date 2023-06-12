@@ -1,0 +1,411 @@
+---
+title: "fig5_exactReproduction"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Exact reproduction
+
+```{r}
+source(here("UtilityFunctions.R"))
+
+cells <- getCells()[(isTumour)]
+
+# Compute proportions: all, tumour, stroma, vascular, interface
+mkProportionBy <- function(byvars, dt, suffix){
+
+	countsBy <- byvars
+	totalsBy <- setdiff(byvars, 'meta_description')
+	outVar <- paste0('proportion_',suffix)
+
+	dt[, counts := .N, by = byvars]
+	dt[, totals := .N, by = totalsBy]
+	dt[, eval(outVar) := (counts / totals)]
+	dt[, eval(c('counts', 'totals')) := NULL]
+	return(dt)
+}
+
+ptCellVars <- c('metabric_id', 'meta_description') 
+mkProportionBy(byvars = ptCellVars,dt = cells, suffix = 'all')
+
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial'),
+	dt = cells, suffix = 'isEpi')
+
+cells[, is_vascular := (Parent_vessel != 0)]
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial', 'is_vascular'),
+	dt = cells, suffix = 'isVesselByEpi')
+
+mkProportionBy(
+	byvars = c(ptCellVars, 'is_epithelial', 'is_interface'),
+	dt = cells, suffix = 'isInterfaceByEpi')
+
+proportionVars <- grep('proportion_', names(cells), value = T)
+phenotypeVars <- grep('meta_|phenotype|colours', names(cells), value = T)
+indicatorVars <- grep('^is_', names(cells), value = T)
+indicatorVars <- setdiff(indicatorVars, c('is_normal', 'is_dcis'))
+
+toKeep <- c(ptCellVars, proportionVars, phenotypeVars, indicatorVars)
+proportionsOut <- cells[, .SD, .SDcols = toKeep]
+proportionsOut <- melt(proportionsOut,
+	id.vars = c('metabric_id', phenotypeVars, indicatorVars),
+	measure.vars = proportionVars,
+	value = 'proportion',
+	variable = 'type'
+	)	
+proportionsOut[, type := gsub('proportion_', '', type)]
+proportionsOut[type == 'isEpi', 
+	type := ifelse(is_epithelial, 'tumour', 'stroma')]
+proportionsOut[type == 'isVesselByEpi', 
+	type := ifelse(is_vascular, 'vesselByEpi', 'NotVesselByEpi')]
+proportionsOut[type == 'isInterfaceByEpi', 
+	type := ifelse(is_interface, 'interfaceByEpi', 'NotInterfaceByEpi')]
+proportionsOut[grep('ByEpi',type), newSuffix := gsub('[0-9]*', '', meta_id)]
+proportionsOut[, type := gsub('ByEpi', '', type)]
+proportionsOut[!is.na(newSuffix), type := paste0(type, newSuffix)][,
+	newSuffix := NULL]
+proportionsOut <- proportionsOut[, .SD[1], by = .(metabric_id, meta_id, type)]
+proportionsOut[, type := gsub(' ', '', type)]
+
+proportionsOut[, check := sum(proportion), by = .(metabric_id, type)]
+stopifnot(all.equal(rep(1, nrow(proportionsOut)), proportionsOut[['check']]))
+proportionsOut[, check := NULL]
+
+outfile <- here('scratch/cellPhenotypeProportions.fst')
+write_fst(proportionsOut, outfile)
+
+```
+
+
+```{r}
+# Structures
+outDir <- here('scratch')
+TMEStructures <- here('scratch/ptLeveLTMEInteractions.fst')
+TMEStructures <- read_fst(TMEStructures, as.data.table = T)
+IDs <- getCells()[, .(metabric_id, isDiscovery)]
+IDs <- IDs[, .SD[1], by = metabric_id]
+TMEStructures <- merge(x = TMEStructures, y = IDs, by = 'metabric_id') 
+TMEStructures[, isTestCohort := ifelse(isDiscovery, 'train', 'test')]
+setnames(TMEStructures, 
+	c('nInteractionsPerStructure', 'TotalInteractions'),
+	c('module_count', 'total_communities'))
+TMEStructures[, proportion := module_count / total_communities]
+TMEStructures[, proportion := gtools::logit(ifelse(proportion == 1, proportion - 1e-6, proportion + 1e-6))]
+structures <- getStructures()
+predictors <- TMEStructures[, .(metabric_id, TMEStructure, proportion, total_communities, isTestCohort)]
+predictors[, weights := sum(unique(total_communities)), by = metabric_id]
+predictors[, total_communities := NULL]
+predictors <- dcast(predictors, metabric_id + weights + isTestCohort ~ TMEStructure, value.var = 'proportion')
+oldNames <- grep('metabric_id|weights|isTestCohort', names(predictors), invert = TRUE, value = TRUE)
+newNames <- paste0('TMEStructure', oldNames)
+setnames(predictors, oldNames, newNames)
+	
+# Network properties
+nwP <- here('scratch/NetworkProperties.rds')
+nwP <- readRDS(nwP)
+standardiseNwP <- function(name){
+	dt <- nwP[[name]]
+	setnames(dt, grep('communities_', names(dt), value = TRUE), 'communityID')
+	dt[, type := name]
+	return(dt)
+}
+nwP <- rbindlist(lapply(c('stroma', 'tumour'), standardiseNwP))
+IDs <- getCells()[, .(ImageNumber, metabric_id)][, .SD[1], by = ImageNumber]
+nwP <- merge(x = nwP, y = IDs, by = 'ImageNumber') 
+nwP[, assortativity := NULL] #has NAs
+measureVars <- grep('ImageNumber|communityID|type|metabric_id', names(nwP), 
+	invert = TRUE, value = TRUE)
+PtmeasureVars <- paste0(measureVars, 'PtMean')
+nwP[, eval(PtmeasureVars) := lapply(.SD, mean), by = .(type, metabric_id), .SDcols = measureVars]
+nwP <- nwP[, .SD[1], by = .(type, metabric_id)]
+nwP <- nwP[, .SD, .SDcols = c('metabric_id', 'type', PtmeasureVars)]
+nwP <- melt(nwP, id.vars = c('metabric_id', 'type'))
+nwP[, variable := paste0(variable, '_', type)]
+nwP <- dcast(nwP, metabric_id ~ variable)
+nwP <- na.omit(nwP)
+nwPredictorsTumour <- grep('_tumour', names(nwP), invert = F, value = T)
+nwPredictorsTME <- grep('_stroma', names(nwP), invert = F, value = T)
+predictors <- merge(x = predictors, y = nwP, by = 'metabric_id') 
+
+# Cell phenotype proportions
+cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(metabric_id, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,metabric_id]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('metabric_id', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+   y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+   by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+   by = c('metabric_id', 'meta_description', 'type'), all.x = T) 
+cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
+cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+cellPhenotypes[is.na(proportion), proportion := 0]
+cellPhenotypes[, checkBothCompartments := sum(proportion), by = .(metabric_id, type)]
+cellPhenotypes <- cellPhenotypes[checkBothCompartments > 0][, checkBothCompartments := NULL]
+cellPhenotypes <- dcast(cellPhenotypes, metabric_id ~ meta_description, value.var = 'proportion')
+cellPhenotypes <- na.omit(cellPhenotypes) # samples that contain both tumour and stromal cells
+predictors <- merge(x = predictors, y = cellPhenotypes, by = 'metabric_id')
+
+```
+
+```{r}
+clinical_data <- read_csv(here('DATA/IMCClinical.csv'))
+
+# Response intclusts
+intClust <- as.data.table(clinical_data)[, .(metabric_id, IntClust)]
+intClust <- intClust[!is.na(IntClust)]
+for(i in sortunique(intClust$IntClust)) intClust[, eval(i) := as.numeric(IntClust == i)]
+intClust[, IntClust := NULL]
+
+# Response PAM groups
+PAM50 <- as.data.table(clinical_data)[, .(metabric_id, PAM50)]
+PAM50 <- PAM50[!is.na(PAM50)]
+for(i in sortunique(PAM50$PAM50)) PAM50[, eval(i) := as.numeric(PAM50 == i)]
+PAM50[, PAM50 := NULL]
+
+toModel <- merge(x = predictors, y = intClust, by = 'metabric_id', all.x = T)
+toModel <- merge(x = toModel, y = PAM50, by = 'metabric_id', all.x = T)
+
+fitModel <- function(response, predictors, Weights, dt){
+	dt <- dt[, .SD, .SDcols = c(response, predictors, Weights)]	
+	dt <- na.omit(dt)
+	weights <- dt[, get(Weights)]
+	response <- as.numeric(dt[, get(response)])
+	predictors <- dt[, .SD, .SDcols = predictors]
+	lassoFit <- cv.glmnet(as.matrix(predictors), as.matrix(response), weights = weights, 
+		family = 'binomial', nlambda = 100, nfolds = 20, alpha = 0)
+	return(lassoFit)
+}
+toModel <- split(toModel, by = 'isTestCohort')
+responseVars <- grep('IntClust', names(toModel$train), value = T)
+responseVars <- c(responseVars, c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like'))
+
+getAUC <- function(
+	responseVar, # character column name
+	predictors, # character vector of column names
+	Weights, # character column name
+	testTrain # list of dts named 'train' and 'test' 
+	){
+
+	sampleSizeTrain <- testTrain$train[!is.na(get(responseVar)), .N]
+	samplePositiveTrain <- testTrain$train[get(responseVar) == 1, .N]
+
+	sampleSizeTest <- testTrain$test[!is.na(get(responseVar)), .N]
+	samplePositiveTest <- testTrain$test[get(responseVar) == 1, .N]
+
+	modelFit <- fitModel(response = responseVar, predictors = predictors, 
+		Weights = Weights, dt = testTrain$train)
+
+	testDt <- testTrain$test[, .SD, .SDcols = c(responseVar, predictors)]
+	testDt <- na.omit(testDt)
+	testMat <- as.matrix(testDt[, .SD, .SDcols = predictors])
+	predictions <- predict(modelFit, testMat, type = 'response', s = 'lambda.min')
+	trueLabels <- as.numeric(testDt[, get(responseVar)])
+	predictObj <- prediction(predictions, trueLabels)
+	auc <- performance(predictObj,"auc") 
+	auc <- as.numeric(auc@y.values)
+	return(data.table(
+		sampleSizeTrain = sampleSizeTrain, samplePositiveTrain = samplePositiveTrain,
+		sampleSizeTest = sampleSizeTest, samplePositiveTest = samplePositiveTest,
+		response = responseVar, auc = auc))
+}
+
+mkAUCsTable <- function(Rep, predictors){
+	mkAUC <- function(responseVar, predictors, Weights, testTrain){
+		tryCatch(
+			expr = {getAUC(responseVar, predictors, Weights, testTrain)},
+			error = function(e){return(NULL)}
+			)
+	}
+	AUCs <- rbindlist(mclapply(responseVars, mkAUC, predictors = predictors, 
+		Weights = 'weights', testTrain = toModel, mc.cores = 12))
+	AUCs[, rep := Rep]
+	return(AUCs)
+}
+
+# Fit modeltypes
+RNGkind("L'Ecuyer-CMRG")
+mc.reset.stream()
+doAUCs <- function(predictors){
+	Reps <- seq_len(1)
+	AUCs <- rbindlist(lapply(Reps, mkAUCsTable, predictors = predictors))
+	return(AUCs)
+}
+TMEStructurePredictors <- grep('TMEStructure[0-9]*', names(predictors), value = TRUE)
+AllPredictors <- c(TMEStructurePredictors, nwPredictorsTumour, nwPredictorsTME, cPh_tumour, cPh_tme)
+AUCs <- lapply(list(cPh_tumour, cPh_tme, TMEStructurePredictors, 
+	nwPredictorsTumour, nwPredictorsTME, AllPredictors), doAUCs)
+names(AUCs) <- c('Cell phenotype (Tumour)', 'Cell phenotype (TME)', 'TME Structures', 
+	'Network properties (Tumour)', 'Network properties (TME)', 'Combined')
+
+modeltypes <- seq_len(length(AUCs))
+names(modeltypes) <- names(AUCs)
+AUCs <- rbindlist(lapply(names(AUCs), function(name){AUCs[[name]][, type := name]}))
+
+AUCs[, facet_by := modeltypes[type]]
+AUCs[, facet_by := factor(facet_by, 
+	levels = modeltypes, labels = names(modeltypes), ordered = TRUE)]
+outfile <- here('scratch/glmnetAUCs_reproduction.fst')
+write_fst(AUCs, outfile)
+
+```
+
+```{r}
+AUCs <- here('scratch/glmnetAUCs_reproduction.fst')
+AUCs <- read_fst(AUCs, as.data.table = T)
+
+intClustAUCs <- AUCs[grep('IntClust', response)]
+# Plot ic10 AUCs
+intClustCols <- getSubtypeCols()
+intClustCols <- intClustCols$IntClust
+intClustAUCs[, yaxis := as.numeric(gsub('IntClust ', '', response))]
+intClustAUCs[yaxis > 4, yaxis := yaxis + 2]
+intClustAUCs[grep('4\\+', response), yaxis := 4]
+intClustAUCs[grep('4\\-', response), yaxis := 5]
+intClustAUCs[grep('5\\+', response), yaxis := 6]
+intClustAUCs[grep('5\\-', response), yaxis := 7]
+intClustAUCs <- intClustAUCs[order(type, yaxis),]
+
+intClustAUCs[, yaxis := factor(yaxis, 
+	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
+intClustAUCs[, colours := intClustCols[response]]
+intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
+
+aucPlot <- ggplot() +
+	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
+	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
+	geom_point(data = intClustAUCs, 
+		aes(x = auc, y = yaxis, colour = colours), size = 2.5,
+		pch = 21, fill = 'lightgrey') +
+	geom_point(data = intClustAUCs[auc > 0.5], 
+		aes(x = auc, y = yaxis, fill = colours), size = 3,
+		pch = 21, colour = 'black') +
+	scale_fill_identity() +
+	scale_colour_identity() +
+	theme_prj(base_line_size = 0.25) +
+	theme(legend.position = 'none',
+		panel.background = element_rect(colour = 'black', size = 0.25),
+		axis.title.y = element_blank(),
+		axis.ticks.y = element_blank(),
+		panel.spacing.x = unit(1,'mm'),
+		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
+	facet_wrap(vars(facet_by), nrow = 1) +
+	labs(x = 'AUC')
+
+mkCountBar <- function(DaT){
+	barCount <- ggplot(data = DaT) +
+		geom_bar( 
+			aes(y = samplePositiveTest, x = yaxis), 
+			width = 0.8, stat = 'identity', fill = 'grey') +
+		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
+			hjust = 0, nudge_y = 1) +
+		facet_wrap(vars(facet_by)) +
+		theme_prj() +
+		theme(strip.text = element_blank(),
+			plot.margin = unit(c(0,5,0,0), 'mm'),
+			axis.line = element_blank(),
+			axis.text = element_blank(),
+			axis.ticks = element_blank(),
+			axis.title.y = element_blank(),) +
+		labs(y = bquote(italic('n')~'tumours')) +
+		coord_flip(clip = 'off')
+	return(barCount)	
+}
+barCount <- mkCountBar(intClustAUCs[, .SD[1], by = response])
+
+icOut <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(6, 0.4))
+outfile <- here('output/Danenberg_reproduction/intClustAUCs.pdf')
+save_plot(outfile, icOut, base_width = 13, base_height = 3)
+
+```
+
+
+```{r}
+AUCs <- here('scratch/glmnetAUCs_reproduction.fst')
+AUCs <- read_fst(AUCs, as.data.table = T)
+
+intClustAUCs <- AUCs[grep('HER|Basal|Luminal|Normal', response)]
+# Plot ic10 AUCs
+intClustCols <- getSubtypeCols()
+intClustCols <- intClustCols$PAM50
+
+intClustAUCs[, yaxis := ifelse(response=='Basal', 1, ifelse(response=='HER2', 2,ifelse(response=='Luminal A', 3, ifelse(response=='Luminal B', 4, 5))))]
+# intClustAUCs[yaxis > 4, yaxis := yaxis + 2]
+# intClustAUCs[grep('4\\+', response), yaxis := 4]
+# intClustAUCs[grep('4\\-', response), yaxis := 5]
+# intClustAUCs[grep('5\\+', response), yaxis := 6]
+# intClustAUCs[grep('5\\-', response), yaxis := 7]
+intClustAUCs <- intClustAUCs[order(type, yaxis),]
+
+intClustAUCs[, yaxis := factor(yaxis, 
+	levels = unique(yaxis), labels = unique(response), ordered = TRUE)]
+intClustAUCs[, colours := intClustCols[response]]
+intClustAUCs[, yaxis := reorder(yaxis, dplyr::desc(yaxis))]
+
+x <- c("Cell phenotype (Tumour)","Cell phenotype (TME)","TME Structures", "Network properties (Tumour)", "Network properties (TME)","shape features","scale features", "shape and scale features",  "Combined")
+
+intClustAUCs <- intClustAUCs %>%
+arrange(sapply(type, function(y) which(y == x)))
+
+aucPlot <- ggplot() +
+	geom_vline(xintercept = seq(0.4, 0.8, 0.1), colour = 'lightgrey', size = 0.3) +
+	geom_vline(xintercept = 0.5, colour = 'steelblue', size = 0.5, linetype = 'dotted') +
+	geom_point(data = intClustAUCs, 
+		aes(x = auc, y = yaxis, colour = colours), size = 2.5,
+		pch = 21, fill = 'lightgrey') +
+	geom_point(data = intClustAUCs[auc > 0.5], 
+		aes(x = auc, y = yaxis, fill = colours), size = 3,
+		pch = 21, colour = 'black') +
+	scale_fill_identity() +
+	scale_colour_identity() +
+	theme_prj(base_line_size = 0.25) +
+	theme(legend.position = 'none',
+		panel.background = element_rect(colour = 'black', size = 0.25),
+		axis.title.y = element_blank(),
+		axis.ticks.y = element_blank(),
+		panel.spacing.x = unit(1,'mm'),
+		plot.margin = unit(c(0,0.25,0,0), 'mm')) +
+	facet_wrap(vars(facet_by), nrow = 1) +
+	labs(x = 'AUC')
+
+mkCountBar <- function(DaT){
+	barCount <- ggplot(data = DaT) +
+		geom_bar( 
+			aes(y = samplePositiveTest, x = yaxis), 
+			width = 0.8, stat = 'identity', fill = 'grey') +
+		geom_text(aes(y = samplePositiveTest, x = yaxis, label = samplePositiveTest), 
+			hjust = 0, nudge_y = 1) +
+		facet_wrap(vars(facet_by)) +
+		theme_prj() +
+		theme(strip.text = element_blank(),
+			plot.margin = unit(c(0,5,0,0), 'mm'),
+			axis.line = element_blank(),
+			axis.text = element_blank(),
+			axis.ticks = element_blank(),
+			axis.title.y = element_blank(),) +
+		labs(y = bquote(italic('n')~'tumours')) +
+		coord_flip(clip = 'off')
+	return(barCount)	
+}
+barCount <- mkCountBar(intClustAUCs[, .SD[1], by = response])
+
+icOut2 <- plot_grid(aucPlot, barCount, align = 'h', rel_widths = c(6, 0.4))
+
+outfile <- here('output/Danenberg_reproduction/PAMAUCs.pdf')
+save_plot(outfile, icOut2, base_width = 12, base_height = 3)
+
+outfile <- here('output/Method_comparison/logistic_regression/PAMAUCs_reproduction.pdf')
+save_plot(outfile, plot_grid(icOut, icOut2, ncol=1), base_width = 12, base_height = 6)
+
+```
+

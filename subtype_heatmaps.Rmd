@@ -1,0 +1,95 @@
+---
+title: "Subtype_heatmaps"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(here)
+library(ggplot2)
+library(tidyverse)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(circlize)
+library(corrplot)
+library(Hmisc)
+
+clinical_data <- getClinical()
+selected_features <- readRDS(here('scratch/significantFeatures.rds'))
+
+original_density_features <- getCellProportionsPerImage() %>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(original_density_features) <- gsub('_CPh', '_originalClass', colnames(original_density_features), fixed = T)
+
+density_features <- getCellProportionsPerImageAlternative()%>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(density_features) <- gsub('_CPh', '', colnames(density_features), fixed = T)
+
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+shape_features$tnumber <- as.numeric(shape_features$tnumber)
+scale_features$tnumber <- as.numeric(scale_features$tnumber)
+colnames(shape_features)<-paste('shape',colnames(shape_features),sep="_")
+colnames(scale_features)<-paste('scale',colnames(scale_features),sep="_")
+
+
+```
+```{r}
+
+allfeatures <- merge(merge(density_features,shape_features, by.x='ImageNumber', by.y='shape_tnumber'),scale_features,by.x='ImageNumber',by.y='scale_tnumber')
+allfeatures <- generate_matrix(allfeatures, 'ImageNumber')
+
+correlation_matrix <- rcorr(as.matrix(allfeatures))
+correlation_pvalues <- correlation_matrix$P
+correlations <- correlation_matrix$r
+correlationMelted <- merge(melt(correlation_pvalues) %>% rename(pvalue = value), melt(correlations) %>% rename(cor = value), by=c('Var1','Var2'))
+correlationMelted[is.na(correlationMelted)] <- 0
+correlationMelted <- correlationMelted %>% mutate(adjusted_p = p.adjust(pvalue, method = "bonferroni"))
+correlationMelted <- correlationMelted %>% filter(adjusted_p < 0.05 & (cor > 0.6 | cor < -0.6))
+
+g1 <- ggplot(correlationMelted) + geom_tile(aes(x=Var1, y=Var2, fill=cor)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),axis.text = element_text(size = 2))
+ggsave(here('output/Method_comparison/feature_importance/correlationMatrix.pdf'))
+
+# correlations[lower.tri(correlations)] <- NA
+
+col_fun = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+
+correlations <- correlation_matrix$r
+correlations[upper.tri(correlations)] <- 0
+correlations <- as.data.frame(correlations) %>% dplyr::select(any_of(c(colnames(density_features),colnames(shape_features))))
+correlations <- t(as.data.frame(t(correlations)) %>% dplyr::select(any_of(c(colnames(density_features), colnames(shape_features)))))
+hm <- Heatmap(correlations, cluster_rows = F, cluster_columns = F, column_names_gp = grid::gpar(fontsize = 2),row_names_gp = grid::gpar(fontsize = 2),col=col_fun)
+save_pdf(hm, here('output/Method_comparison/feature_importance/shapefeaturecorrelations.pdf'))
+
+
+correlations <- correlation_matrix$r
+correlations[upper.tri(correlations)] <- 0
+correlations <- as.data.frame(correlations) %>% dplyr::select(any_of(c(colnames(density_features), colnames(scale_features))))
+correlations <- t(as.data.frame(t(correlations)) %>% dplyr::select(any_of(c(colnames(density_features), colnames(scale_features)))))
+hm <- Heatmap(correlations, cluster_rows = F, cluster_columns = F, column_names_gp = grid::gpar(fontsize = 2),row_names_gp = grid::gpar(fontsize = 2),col=col_fun)
+save_pdf(hm, here('output/Method_comparison/feature_importance/scalefeaturecorrelations.pdf'))
+```
+## Heatmaps per subtype
+
+```{r}
+subtypes <- c('ER-HER2+','ER+HER2+','ER-HER2-','ER+HER2-','Normal-like','Basal','HER2', 'Luminal B', 'Luminal A' )
+
+for (s in subtypes){
+  subset <- merge(allfeatures, clinical_data %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)), by.x='row.names',by.y='ImageNumber' )
+  subset <- subset %>% filter(PAM50 == s | ER_HER2_status == s) %>% dplyr::select(-c(PAM50, ER_HER2_status))
+  subset_features <- row.names(apply(selected_features[s,2:ncol(selected_features)], 1, function(x)which(x>0)))
+  print(subset_features)s
+  subset <- subset %>% dplyr::select(any_of(c(subset_features)))
+  
+  hm <- Heatmap(t(as.matrix(subset)), cluster_rows = T, cluster_columns = T,,row_names_gp = grid::gpar(fontsize = 6))
+  save_pdf(hm, paste(here('output/Method_comparison/heatmaps/hm_'), gsub('+','plus',s,fixed=T),'.pdf',sep=''),width = 14,height=10)
+  
+  
+}
+```
+

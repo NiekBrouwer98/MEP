@@ -12,23 +12,43 @@ library(doMC)
 cores = detectCores()
 registerDoMC(14)
 
-source("/opt/home/MEP/UtilityFunctions.R")
-library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+
 library(data.table)
+library(fst)
 library(R.utils)
-# library(ggplot2)
 
 
-# Load datasets
-initial_params_folder <- '/opt/home/MEP/scratch/init_parameters'
-n_cells <- readRDS('/opt/home/MEP/scratch/n_cells.rds')
-xy_data_exc_oct <- readRDS('/opt/home/MEP/scratch/xy_data_exc_oct.rds')
+###CONFIG
+name <- 'Vascular_stroma'
+distance_data <- here('scratch/AUCScaledSlides_300_VascularStroma.tsv')
+initial_params_folder <- paste(here('scratch/init_parameters_'),name, sep = '')
+cells <- readRDS(here('DATA/splittedCells_vascularStroma.rds')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
+outfile <- paste(here('scratch/success_models_'),name,sep='')
+
+n_cells <- getCellCounts(cells) %>% dplyr::rename(phenotype = meta_description) %>% filter(n > 0)
+
+slides <- read_tsv(here('scratch/AUCScaledSlides_300_VascularStroma.tsv'))
+##
+
+# saveRDS(slides, file=here('scratch/AUCScaledSlides_300_ALL_run2.rds'))
+xy_data <- slides %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(x=distance_window, y=`N.per.mm2.scaled`)
 
 # Define phenotype combinations to study in data
-combinations <- readRDS('/opt/home/MEP/scratch/combinations_selection.rds')
-# combinations_selection <- combinations
+combinations <- readRDS(here('scratch/combinations_selection_run2.rds'))
 
-finished_files <- list.files('/opt/home/MEP/scratch/success_models_secondrun/')
+# Directory for results
+# Directory for intermediate results
+if (!dir.exists(paste(here('scratch/success_models_'),name, sep = ''))){
+  dir.create(paste(here('scratch/success_models_'),name, sep = ''))
+}else{
+  message("dir exists")
+}
+
+finished_files <- list.files(paste(here('scratch/success_models_'),name,'/', sep = ''))
 finished_combinations_int <-  finished_files %>% str_replace("success_models_", "")
 finished_combinations_dir <- finished_combinations_int %>% str_replace(".rds", "")
 finished_combinations <- unique(finished_combinations_dir)
@@ -114,6 +134,7 @@ fit_data <- function(xy_coordinates_curves, combi, n_cells_df, threshold_filter_
                     b=mean_params %>% filter(term == 'scale') %>% pull(mean_estimate))
   
   fit52_oct <- tryCatch({
+    res <- withTimeout({
     nlme(y~nfun2(x,A,B),
          fixed=A+B~1,
          random=list(tnumber=pdDiag(A+B~1)), # or pdDiag, pdLogChol
@@ -124,12 +145,15 @@ fit_data <- function(xy_coordinates_curves, combi, n_cells_df, threshold_filter_
                                               msMaxIter=200,
                                               pnlsTol=1e-1, 
                                               tolerance=1e-6, opt="nlm"))
-  },
+    },timeout = 1800)
+    },
   error=function(cond){
     message(paste('failed',combi))
     return(combi)
+  }, TimeoutException = function(ex){
+    message("Timemout")
+    return(combi)
   })
-  # }
   return(list(model=fit52_oct, xy_data=xy_data_filt))
   
 }
@@ -145,20 +169,15 @@ weib_coefs$sample %<>% as.character()
 weib_coefs$phenotype_combo %<>% as.character()
 
 # Function to store x/y coordinates used for modelling
-xy_data_weib <- xy_data_exc_oct %>% slice(0)
+xy_data_weib <- xy_data %>% slice(0)
 xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 
-# Directory for intermediate results
-# dir.create('/opt/home/MEP/scratch/success_models_secondrun')
-
-success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi){
-  tryCatch({
+success_models <- mclapply(combinations_selection, mc.cores = 12, function(combi){
   # Skip combinations that take to long to avoid hold-up
-  withTimeout({
-  for(threshold_cells in c(5,10)){
+  for(threshold_cells in c(0, 5,10,20,50)){
       message(threshold_cells)
       initial_params <- readRDS(paste(initial_params_folder, '/init_params_', combi, '.rds', sep=''))
-      pipeline_run <- fit_data(xy_data_exc_oct, combi, n_cells,
+      pipeline_run <- fit_data(xy_data, combi, n_cells,
                                threshold_cells, initial_params)
 
       fitted_model <- pipeline_run[['model']]
@@ -191,7 +210,7 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
         # result <- setNames(result, combi)
 
         #Save intermediate result
-        saveRDS(result, file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
+        saveRDS(result, file = paste(outfile, '/success_models_', combi, '.rds', sep = ''))
 
         return(list())
       }
@@ -199,15 +218,10 @@ success_models <- mclapply(combinations_selection, mc.cores = 14, function(combi
   }
     
     # Parameter estimation failed
-    saveRDS(list('FAILEDESTIMATION',list(),list()), file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
+    saveRDS(list('FAILEDESTIMATION',list(),list()), file = paste(outfile, '/success_models_', combi, '.rds', sep = ''))
     return(list())
-    
-  }, timeout=3600)}, error = function(ex){
-    saveRDS(list('TIMEOUT',list(),list()), file = paste('/opt/home/MEP/scratch/success_models_secondrun/success_models_', combi, '.rds', sep = ''))
-    return(list())
-  }) #Set timeout time (60 min = 3600)
-  
 })
+
   
 toc()
 

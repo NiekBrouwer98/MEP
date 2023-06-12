@@ -284,7 +284,7 @@ NetworkLevelDts <- mclapply(dts, toNetworkLevel, mc.cores = n_threads)
 # Collect result and clean intermediate results
 communities <- copy(allOut)
 NetworkProperties <- copy(NetworkLevelDts)
-rm(list = setdiff(ls(), c('communities', 'NetworkProperties')))
+# rm(list = setdiff(ls(), c('communities', 'NetworkProperties')))
 ```
 
 
@@ -455,7 +455,7 @@ outfile <- here('scratch/ptLeveLTMEInteractions.fst')
 write_fst(ptLevel, outfile, compress = 100)
 
 #Clean intermediate results
-rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
+# rm(list = setdiff(ls(), c('communitiesResult', 'NetworkProperties', 'TMEStructures', 'TMEStructuresDiscov')))
 
 write_rds(NetworkProperties, here('scratch/NetworkProperties.rds'))
 

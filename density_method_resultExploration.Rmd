@@ -26,12 +26,10 @@ library(tidyverse)
 library(ggplot2)
 library(data.table)
 library(parallel)
-# library(igraph)
 library(here)
 library(fst)
 library(assertthat)
 library(RColorBrewer)
-# library(latex2exp)
 library(cowplot)
 library(ggpubr)
 library(gtools)
@@ -43,48 +41,128 @@ library(ComplexHeatmap)
 library(factoextra)
 library(corrplot)
 library(tidyHeatmap)
+library(circlize)
+
 
 # set seed
 projectSeed <- 89230689
 set.seed(projectSeed)
 
-outDir <- here('scratch')
-cells <- getCells()
 clinical_data <- getClinical()
 
 ```
+We are going to analyse the feature sets on 3 levels: Cohort-wide, molecular subtypes and PAM50 subtypes.
 
 ## Heatmaps
 
+### Cohort-wide
+We scale the features. Rows are already scaled where the sum of all epithelial cell types == 1 and all TME cell types == 1.
 ```{r}
-# Are we going to scale the rows as well? The sums of each row are always 2 (1 for tumor cells, 1 for TME cells)
-
+cells <- getCells()
 cellPhenotypes <- getCellProportionsPerImage()
 density_matrix <- generate_matrix(cellPhenotypes, 'ImageNumber')
 
 library(circlize)
 col_fun = colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
 
-density_hm <- Heatmap(as.matrix(density_matrix %>% select(-c('isTumour'))),name='densities', column_title = 'cell type', 
-                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
+row_ha = rowAnnotation(isTumour = density_matrix %>% pull('isTumour'))
 
-save_pdf(density_hm, here('output/Method_comparison/heatmaps/density_heatmap.pdf'), width=20, height=15)
+density_hm <- Heatmap(as.matrix(density_matrix %>% select(-c('isTumour')) %>% rename_with(~str_remove(., '_CPh'))),name='densities', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+
+save_pdf(density_hm, here('output/Method_comparison/heatmaps/density_heatmap.pdf'), width=10, height=10)
 
 ```
 
-## PCA
+```{r}
+cells <- getCellsAlternative()
+cellPhenotypes <- getCellProportionsPerImageAlternative()
+density_matrixAlternative <- generate_matrix(cellPhenotypes, 'ImageNumber')
 
+library(circlize)
+col_fun = colorRamp2(c(-4, 0,4 ), c("blue","white", "red"))
+
+row_ha = rowAnnotation(isTumour = density_matrixAlternative %>% pull('isTumour'))
+
+density_hm <- Heatmap(as.matrix(density_matrixAlternative %>% select(-c('isTumour')) %>% rename_with(~str_remove(., '_CPh'))),name='densities', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+
+save_pdf(density_hm, here('output/Method_comparison/heatmaps/density_heatmap_alternative.pdf'), width=10, height=10)
+```
+
+Take a look at the molecular subtypes.
+
+```{r}
+subtypes <- setdiff(unique(merge(density_matrix, clinical_data, by.x='row.names', by.y='ImageNumber', all.x=T) %>% pull("ER_HER2_status")),NA)
+
+for (s in subtypes){
+  samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`ER_HER2_status` == s) %>% pull(`ImageNumber`)))
+  
+  row_ha = rowAnnotation(isTumour = samples_cellPHenotypes %>% pull('isTumour'))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes %>% select(-c('isTumour'))  %>% rename_with(~str_remove(., '_CPh'))),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/molecularSubtype_heatmaps/'),'density_heatmap_',gsub('+', 'pos', s,fixed=T),'.pdf',sep=''), width=10, height=10)
+  
+  
+  samples_cellPHenotypesAlternative <- density_matrixAlternative %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`ER_HER2_status` == s) %>% pull(`ImageNumber`)))
+
+    row_ha = rowAnnotation(isTumour = samples_cellPHenotypesAlternative %>% pull('isTumour'))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypesAlternative %>% select(-c('isTumour'))  %>% rename_with(~str_remove(., '_CPh'))),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/molecularSubtype_heatmaps/'),'density_heatmap_',gsub('+', 'pos', s,fixed = T),'_alternative.pdf',sep=''), width=10, height=10)
+
+  
+}
+```
+
+
+Take a look at the PAM50 patient groups.
+
+```{r}
+subtypes <- setdiff(unique(merge(density_matrix, clinical_data, by.x='row.names', by.y='ImageNumber', all.x=T) %>% pull('PAM50')),NA)
+
+for (s in subtypes){
+  samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`)))
+  
+  row_ha = rowAnnotation(isTumour = samples_cellPHenotypes %>% pull('isTumour'))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes %>% select(-c('isTumour'))  %>% rename_with(~str_remove(., '_CPh'))),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/PAM50_heatmaps/'),'density_heatmap_',s,'.pdf',sep=''), width=10, height=10)
+  
+  
+  samples_cellPHenotypesAlternative <- density_matrixAlternative %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`)))
+
+    row_ha = rowAnnotation(isTumour = samples_cellPHenotypesAlternative %>% pull('isTumour'))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypesAlternative %>% select(-c('isTumour'))  %>% rename_with(~str_remove(., '_CPh'))),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=8),cluster_rows = T, cluster_columns = T, col=col_fun, right_annotation = row_ha)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/PAM50_heatmaps/'),'density_heatmap_',s,'_alternative.pdf',sep=''), width=10, height=10)
+
+  
+}
+```
+
+
+## PCA
 Now perform PCA to separate the samples.
 
 ```{r}
 generate_labels <- function(matrix){
-labels <- merge(as_tibble(rownames(density_matrix)), clinical_data, by.x='value', by.y='ImageNumber', all.x=T)
-labels <- labels %>% rename(ImageNumber = value)%>%
-  mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
-  mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
-  mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
-  mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
-  mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
+labels <- merge(x = as_tibble(rownames(matrix)), y = clinical_data, by.x='value', by.y='ImageNumber', all.x=T)
+labels <- labels %>% rename(ImageNumber = value)
+# %>%
+#   mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
+#   mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
+#   mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
+#   mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+#   mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
 
 colnames(labels) <- gsub(" ", "_", colnames(labels))
 return(labels)
@@ -103,92 +181,22 @@ plot_pca <- function(matrix, label){
   
 }
 
-plot_pca(density_matrix, 'PAM50')
-ggsave(here('output/Method_comparison/pca/pca_density_PAM50.pdf'))
+plot_pca(density_matrix %>% filter(isTumour > 0) %>% select(-c(isTumour)), 'PAM50')
+ggsave(here('output/Method_comparison/pca/pca_density_PAM50.pdf'),width=8,height=7)
 
-plot_pca(density_matrix, 'IntClust')
-ggsave(here('output/Method_comparison/pca/pca_density_IntClust.pdf'))
+plot_pca(density_matrixAlternative  %>% filter(isTumour > 0) %>% select(-c(isTumour)), 'PAM50')
+ggsave(here('output/Method_comparison/pca/pca_density_PAM50_alternative.pdf'),width=8,height=7)
 
+plot_pca(density_matrix  %>% filter(isTumour > 0) %>% select(-c(isTumour)), "ER_HER2_status")
+ggsave(here('output/Method_comparison/pca/pca_density_ERHer2.pdf'),width=8,height=7)
+
+plot_pca(density_matrixAlternative  %>% filter(isTumour > 0) %>% select(-c(isTumour)),"ER_HER2_status")
+ggsave(here('output/Method_comparison/pca/pca_density_ERHer2_alternative.pdf'),width=8,height=7)
 ```
 
 
 
-Now consider tumor and TME cells separately.
 
-```{r}
-TME <- getTumorAndTMETypes()$TME_types
-tumor <- getTumorAndTMETypes()$tumor_types
-TME_colnames = paste(TME, '_CPh',sep='')
-tumor_colnames = paste(tumor, '_CPh', sep='')
-
-tumor_densities <- as.data.frame(cellPhenotypes)[,c(tumor_colnames, 'ImageNumber')]
-tumor_densities <- na.omit(tumor_densities)
-tumor_density_matrix <- generate_matrix(tumor_densities,'ImageNumber')
-
-tumor_density_hm <- Heatmap(as.matrix(tumor_density_matrix),name='densities', column_title = 'cell type', 
-                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
-
-save_pdf(tumor_density_hm, here('output/Method_comparison/heatmaps/tumor_density_heatmap.pdf'), width=20, height=15)
-
-plot_pca(tumor_density_matrix, 'PAM50')
-ggsave(here('output/Method_comparison/pca/pca_tumor_density.pdf'))
-
-plot_pca(tumor_density_matrix, 'IntClust')
-ggsave(here('output/Method_comparison/pca/pca_tumor_density_IntClust.pdf'))
-
-```
-
-```{r}
-tme_densities <- as.data.frame(cellPhenotypes)[,c(TME_colnames, 'ImageNumber')]
-tme_densities <- na.omit(tme_densities)
-tme_density_matrix <- generate_matrix(tme_densities,'ImageNumber')
-
-tme_density_hm <- Heatmap(as.matrix(tme_density_matrix),name='densities', column_title = 'cell type', 
-                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
-
-save_pdf(tme_density_hm, here('output/Method_comparison/heatmaps/tme_density_heatmap.pdf'), width=20, height=15)
-
-plot_pca(tme_density_matrix, 'PAM50')
-ggsave(here('output/Method_comparison/pca/pca_tme_density.pdf'))
-
-plot_pca(tme_density_matrix, 'IntClust')
-ggsave(here('output/Method_comparison/pca/pca_tme_density_IntClust.pdf'))
-
-```
-
-Take a look at the PAM50 patient groups.
-
-```{r}
-subtypes <- unique(merge(density_matrix, clinical_data, by.x='row.names', by.y='ImageNumber', all.x=T) %>% pull('PAM50'))
-
-for (s in subtypes){
-  if (is.na(s)){
-      samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(is.na(`PAM50`)) %>% pull(`ImageNumber`))) %>% select(-c('isTumour'))
-  
-  }else{
-  samples_cellPHenotypes <- density_matrix %>% filter(rownames(density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`))) %>% select(-c('isTumour'))
-  }
-  
-  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
-                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15),cluster_rows = T, cluster_columns = T, col=col_fun)
-  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/'),'density_heatmap_',s,'.pdf',sep=''), width=20, height=14)
-  
-}
-```
-
-PAM50 do not have clear cell type density signatures. The subtypes are based on gene signatures of tumor cells. Let's have a look at the type of tumor cells in the subtypes
-
-```{r}
-for (s in subtypes){
-  samples_cellPHenotypes <- tumor_density_matrix %>% filter(rownames(tumor_density_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`)))
-  
-  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
-                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=13),cluster_rows = T, cluster_columns = F, col=col_fun)
-  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/'),'tumor_density_heatmap_',s,'.pdf',sep=''), width=20, height=14)
-  
-}
-
-```
 
 ## Basal subtypes with ER+ cells
 
@@ -261,6 +269,7 @@ h <- Heatmap(zero_count_result,name='not zero percentage', cluster_columns = F, 
 save_pdf(h, here('output/Density_results/zero_counts_per_subtype.pdf'),width=10, height=10)
 
 ```
+
 ## Densities in PAM50 subtypes
 
 ```{r}

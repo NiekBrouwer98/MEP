@@ -1,0 +1,349 @@
+---
+title: "region_analysis"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Region analysis
+In this document we are going to investigate the following hypothesis:
+
+What are common spatial arrangements in structure-dense slide regions such as vascular stroma, granulocyte enriched, APC enriched, and suppressed expansion?
+We first look into these regions because they are associated with an improved (granulocyte enriched, APC enriched, and suppressed expansion) and decreased (vascular stroma) survival in ER+ patients.
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(here)
+library(fst)
+library(data.table)
+source(here("UtilityFunctions.R"))
+source(here('MEP_UtilityFunctions.R'))
+library(ComplexHeatmap)
+library(spatstat)
+library(dbscan)
+
+clinical_data <- getClinical()
+cells <- getCellsAlternative()
+structures <- getStructures()
+structureLabels <- gsub("[^A-Za-z0-9+[:space:]]",'', structures$TME$labels)
+structureLabels <- tibble(index = seq(1,10), label = structureLabels)
+TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
+allCommunities <- read_rds(here('scratch/allCommunities.rds'))
+```
+
+```{r}
+allCommunities <- merge(allCommunities, TMEStructures %>% dplyr::select(communityUID, TMEStructure), by='communityUID')
+
+cellsWithoutExpression <- cbind(cells[,1:(ncol(cells)-43)],cells[,(ncol(cells)-3):ncol(cells)])
+cellsWithStructure <- merge(cellsWithoutExpression, allCommunities %>% dplyr::select(-c('to', 'to_meta_id', 'nInteractions')), by.x = c('ImageNumber', 'ObjectNumber'), by.y=c('ImageNumber', 'from'), all=T)
+cellsWithStructure <- cellsWithStructure %>% mutate(TMEStructure = as.numeric(TMEStructure))
+cellsWithStructure <- merge(cellsWithStructure, structureLabels, by.x='TMEStructure', by.y='index',all.x=T) %>% distinct()
+
+```
+
+```{r}
+show_slideStructures <- function(df, sample_number, highlight_A, column){
+  slide_1 <- ggplot(data=df%>% filter(ImageNumber == sample_number)) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=get(column)), alpha =1) +theme_bw() + ggtitle(paste('imagenumber: ', sample_number)) + scale_color_discrete(name = 'TME structure')
+  
+  return(slide_1)
+}
+
+show_slideStructures(cellsWithStructure,12, 'Vascular stroma','label')
+# ggsave(here('output/region_analysis/slide743.pdf'),width=15)
+```
+## KDE approach
+```{r}
+structure_type <- 'Vascular stroma'
+
+# Find image with a lot of vascular stroma
+VS <- cellsWithStructure %>% filter(label == structure_type) %>% group_by(ImageNumber) %>% dplyr::count(communityID) %>% dplyr::count(ImageNumber)
+VS_imageN <- VS %>% filter(n > 5) %>% pull(ImageNumber)
+VS_images <- cellsWithStructure %>% filter(ImageNumber %in% VS_imageN)
+VS_images <- VS_images %>% mutate(label =ifelse(label == structure_type, structure_type, 'other'))
+VS_images$label[is.na(VS_images$label)] <- "other"
+show_slideStructures(VS_images, VS_imageN[[2]], 'Vascular stroma','label')
+
+
+```
+
+
+```{r}
+library(cowplot)
+data_with_assigned_locations <- readRDS(here('scratch/dataWithSplittedRegions.rds'))
+
+sampleImages <- sample(VS_imageN, 5)
+
+for (i in sampleImages){
+  print(plot_grid(show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','label'),show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','assigned_loc')))
+}
+
+total <- data_with_assigned_locations %>% group_by(ImageNumber) %>% count()
+structureCount <- data_with_assigned_locations %>% group_by(ImageNumber,label) %>% count()
+structureCount <- merge(total, structureCount, by='ImageNumber')
+structureCount <- structureCount %>% mutate(proportion = round(100*n.y/n.x,2))
+selectedImages <- structureCount %>% filter(label == 'Vascular stroma') %>% filter(proportion > 20) %>% pull(ImageNumber)
+
+sampleImages <- sample(selectedImages, 5)
+
+for (i in sampleImages){
+  print(plot_grid(show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','label'),show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','assigned_loc')))
+}
+
+
+```
+With minimal bandwith = 50
+
+```{r}
+library(cowplot)
+data_with_assigned_locations <- readRDS(here('scratch/dataWithSplittedRegions2.rds'))
+
+sampleImages <- sample(data_with_assigned_locations %>% pull(ImageNumber), 5)
+
+for (i in sampleImages){
+  print(plot_grid(show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','label'),show_slideStructures(data_with_assigned_locations %>% mutate(assigned_loc = ifelse(assigned_loc == 'S', 'structure-dense region','low-density region' )),i, 'Vascular stroma','assigned_loc')))
+    ggsave(paste(here('output/region_analysis/KDE_result_'),i,'.pdf',sep=''),width=10,height=4)
+
+}
+
+data_with_assigned_locations <- data_with_assigned_locations %>% mutate(assigned_loc = ifelse(assigned_loc == 'S', 'Vascular stroma', 'low'))
+data_with_assigned_locations <- data_with_assigned_locations %>% mutate(correct_prediction = ifelse(assigned_loc == label, T, F))
+total <- data_with_assigned_locations %>% filter(label == 'Vascular stroma') %>% group_by(ImageNumber) %>% count()
+predictionPerformance <- data_with_assigned_locations %>% group_by(ImageNumber,correct_prediction) %>% count()
+predictionPerformance <- merge(total, predictionPerformance, by='ImageNumber')
+predictionPerformance <- predictionPerformance %>% mutate(proportion = round(100*n.y/n.x,2))
+selectedImages <- predictionPerformance %>% filter(correct_prediction == T) %>% filter(proportion> 70) %>% pull(ImageNumber)
+
+sampleImages <- sample(data_with_assigned_locations %>% pull(ImageNumber), 5)
+
+for (i in sampleImages){
+  print(plot_grid(show_slideStructures(data_with_assigned_locations,i, 'Vascular stroma','label'),show_slideStructures(data_with_assigned_locations %>% mutate(assigned_loc = ifelse(assigned_loc == 'Vascular stroma', 'structure-dense region','low-density region' )),i, 'Vascular stroma','assigned_loc')))
+  ggsave(paste(here('output/region_analysis/KDE_Filteredresult_'),i,'.pdf',sep=''),width=10,height=4)
+
+}
+
+```
+
+
+
+Split images
+
+```{r}
+splittedCells <- data_with_assigned_locations %>% filter(ImageNumber %in% selectedImages) %>% unite('Split_ImageNumber',c(ImageNumber, assigned_loc), sep = '_', remove = F)
+saveRDS(splittedCells, here('DATA/splittedCells_vascularStroma.rds'))
+
+```
+
+## Weibull estimations
+
+```{r}
+source(here('loadData.R'))
+
+CompileALLParameters_regions <- function(type, save=TRUE){
+  all_parameters <- get_parameters(paste(here('scratch/success_models_'),type,'/',sep='')) %>%
+    separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
+    filter(a > 0.5) %>%
+    filter(b > 8) %>%
+    dplyr::rename(shape =a , scale = b) %>%
+    unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+  
+  if(save){
+    saveRDS(all_parameters, file = paste(here('scratch/all_parameters_'), type,'.rds',sep=''))
+  }
+  
+  return(all_parameters)
+  
+}
+
+CompileALLParameters_regions('Vascular_stroma')
+transform_parameters_to_matrix(readRDS(here('scratch/all_parameters_Vascular_stroma.rds')), here('scratch/features/regions/shape_parameters_Vascular_stroma.rds'),here('scratch/features/regions/scale_parameters_Vascular_stroma.rds') )
+```
+
+```{r}
+allparameters_VS <- readRDS(here('scratch/all_parameters_Vascular_stroma.rds'))  %>% separate(tnumber,c('tnumber','region'),sep='_')
+tumor_celltypes <- grep('CK', unique(cells %>% pull(meta_description)),fixed = T,value=T)
+tme_celltypes <- setdiff( unique(cells %>% pull(meta_description)), tumor_celltypes)
+
+ggplot() + 
+  geom_point(data = allparameters_VS, aes(x=shape, y=scale,colour=region),alpha=0.8, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of structure regions") + 
+  guides(colour = guide_legend(override.aes = list(size=10)))
+
+```
+
+Are some features estimated more in a certain region?
+```{r}
+shapeFeatures_VS <- readRDS(here('scratch/features/regions/shape_parameters_Vascular_stroma.rds')) %>% separate(tnumber,c('tnumber','region'),sep='_')
+scaleFeatures_VS <- readRDS(here('scratch/features/regions/scale_parameters_Vascular_stroma.rds')) %>% separate(tnumber,c('tnumber','region'),sep='_')
+
+na_counts <- merge(data.frame(colSums(is.na(shapeFeatures_VS %>% filter(region == 'Vascular stroma')))),data.frame(colSums(is.na(shapeFeatures_VS %>% filter(region == 'low')))),by='row.names')
+
+colnames(na_counts)[1] <- "feature"
+colnames(na_counts)[2] <- "high"
+colnames(na_counts)[3] <- "low"
+na_counts <- reshape2::melt(na_counts)
+na_counts <- na_counts %>% filter(!(feature %in% c('tnumber', 'region'))) %>% separate(feature, c('phenotype_from', 'phenotype_to'),sep='_to_') 
+
+ggplot(na_counts %>% filter(variable=='high') %>% filter((phenotype_from %in% tme_celltypes) & (phenotype_to %in% tme_celltypes))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=value)) + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('high density region')
+ggplot(na_counts %>% filter(variable=='low') %>% filter((phenotype_from %in% tme_celltypes) & (phenotype_to %in% tme_celltypes))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=value)) + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('low density region')
+
+```
+
+```{r}
+generate_matrix_zeroOneScaling <- function(df, col_rownames ,subselection=NULL, NA_percentage=0, scale_rows=FALSE){
+  m <- as.data.frame(df)
+  rownames(m) <- m[,col_rownames]
+  m <- subset(m,select = -c(get(col_rownames)))
+  
+  # Filtering
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+
+  m <- replace(m,is.na(m),0)
+  m <- as.data.frame(m)
+  
+  
+  # Scaling
+  m <- apply(m, 2, function(x) (x - min(x)) / (max(x) - min(x)))
+  
+  
+  return(m)
+}
+
+shapeFeatures_VS <- generate_matrix_zeroOneScaling(readRDS(here('scratch/features/regions/shape_parameters_Vascular_stroma.rds')), 'tnumber')
+scaleFeatures_VS <- generate_matrix_zeroOneScaling(readRDS(here('scratch/features/regions/scale_parameters_Vascular_stroma.rds')), 'tnumber')
+densityFeatures_VS <- generate_matrix_zeroOneScaling(readRDS(here('scratch/features/regions/cell_proportions_per_imageVS.rds')), 'ImageNumber')
+
+```
+
+```{r}
+# Load required libraries
+library(multcomp)
+library(ggrepel)
+
+computePvalues <- function(featureSet){
+  subset <- as.data.frame(featureSet) %>% mutate(tnumber = row.names(featureSet)) %>% separate(tnumber, c('tnumber', 'group'),sep = '_')  %>% dplyr::select(-dplyr::any_of(c('tnumber')))
+  
+  response <- subset$group
+
+  # Create an empty vector to store the adjusted p-values and log2 fold changes
+  p_values <- rep(NA, ncol(subset)-1)
+  log2_fold_changes <- rep(NA, ncol(subset)-1)
+
+  # Perform univariate feature importance analysis for each feature
+  for (i in 1:(ncol(subset)-1)) {
+    # Extract the current feature
+    feature <- subset[, i]
+
+    # Perform a t-test to assess the significance of the feature
+    test_result <- t.test(feature ~ response)
+
+    # Extract the p-value from the test result
+    p_value <- test_result$p.value
+
+    # Calculate the log2 fold change between the response groups
+    mean_response <- tapply(feature, response, mean)
+    log2_fold_change <- log2(mean_response['Vascular stroma'] / mean_response['low'])
+
+    # Store the p-value and log2 fold change in their respective vectors
+    p_values[i] <- p_value
+    log2_fold_changes[i] <- log2_fold_change
+  }
+
+  # Apply p-value adjustment method (e.g., Bonferroni, Benjamini-Hochberg)
+  adjusted_p_values <- p.adjust(p_values, method = "bonferroni")
+
+  # Create a data frame with the features, p-values, log2 fold changes, and adjusted p-values
+  result <- data.frame(Feature = colnames(subset %>% dplyr::select(-c(group))),
+                       p_value = p_values,
+                       log2FoldChange = log2_fold_changes,
+                       Adjusted_p_value = adjusted_p_values) %>%
+            mutate(Sig = ifelse(Adjusted_p_value < 0.05, T, F))
+
+  return(result)
+}
+
+univariateFeatures <- computePvalues(shapeFeatures_VS) %>% mutate(featureSet = 'shape')
+univariateFeatures <- rbind(univariateFeatures, (computePvalues(scaleFeatures_VS) %>% mutate(featureSet = 'scale')))
+univariateFeatures <- rbind(univariateFeatures, (computePvalues(densityFeatures_VS) %>% mutate(featureSet = 'density')))
+univariateFeatures <- univariateFeatures %>% mutate(minlogP = -log(Adjusted_p_value, base = 10))
+univariateFeatures <- univariateFeatures %>% mutate(Feature = gsub('_CPh','', Feature,fixed=T))
+
+```
+
+```{r}
+# Creating the volcano plot
+fold_threshold = 1
+p_value = -log10(0.05)
+univariateFeatures <- univariateFeatures %>% mutate(Sig = ifelse((minlogP > -log10(0.05)) & (log2FoldChange < -fold_threshold | log2FoldChange > fold_threshold), T, F))
+
+ggplot() +
+  geom_point(data = (univariateFeatures %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP,colour=featureSet)) +
+  geom_point(data = (univariateFeatures %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP),color='grey') +
+  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value",
+       title = "Univariate feature importance") + geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+        geom_hline(yintercept=-log10(0.05), col="black") +theme_bw()
+
+ggsave(here('output/region_analysis/volcanoPlot_VS.pdf'),width=6,height=4)
+```
+```{r}
+significant_densityFeatures <- grep('_to_', univariateFeatures %>% filter(Sig == T) %>% pull(Feature),invert=T,value=T, fixed=T)
+significant_distanceFeatures <- grep('_to_',grep('CK',univariateFeatures %>% filter(Sig == T) %>% pull(Feature), invert = T, value = T),value=T, fixed=T)
+```
+```{r}
+library(patchwork)
+library(cowplot)
+
+retrieveParameters <- function(df,structure,feature){
+  d <- data.frame(df) %>% mutate(tnumber = row.names(df)) %>% dplyr::select(-dplyr::any_of(c('tnumber'))) %>% filter(phenotype_combo == feature) %>% rename(group = region)
+  mean_d <- d %>% group_by(group) %>% summarise(mean_shape = mean(shape), mean_scale =mean(scale))
+  # print(mean_d)
+  shape_group <- mean_d[1,2] %>% pull(mean_shape)
+  scale_group <-  mean_d[1,3] %>% pull(mean_scale)
+  shape_nogroup <- mean_d[2,2]  %>% pull(mean_shape)
+  scale_nogroup <- mean_d[2,3]  %>% pull(mean_scale)
+  
+  return(list('shape' = shape_group, 'scale' = scale_group, 'shape_alternative' = shape_nogroup, 'scale_alternative' = scale_nogroup))
+}
+
+
+create_boxplot <- function(df, structure,feature){
+  d <- data.frame(df) %>% mutate(tnumber = row.names(df)) %>% dplyr::select(-dplyr::any_of(c('tnumber')))%>% filter(phenotype_combo == feature) %>% rename(group = region)
+
+  b1 <- ggplot(na.omit(d)) + geom_boxplot(aes(x=group, y=shape)) + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlim(structure, 'low')
+  b2 <- ggplot(na.omit(d)) + geom_boxplot(aes(x=group, y=scale)) + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(structure, 'low')
+  
+  return(plot_grid(b1,b2,nrow=1))
+  
+}
+
+showDistanceCurves <- function(df, structure, feature){
+  params <- retrieveParameters(df,structure,feature)
+  g1 <- ggplot() + 
+    stat_function(fun = dweibull, args = list(shape = params$shape,scale = params$scale), aes(colour=structure))  +
+    stat_function(fun = dweibull, args = list(shape = params$shape_alternative ,scale = params$scale_alternative), aes(colour='low'))  +
+  xlim(0,600) + theme_bw() + xlab('micron') + ylab('N') + ylim(0,0.1) + ggtitle(feature)
+    
+  b1 <- create_boxplot(df, structure,feature)
+  g_total <- g1 + inset_element(b1, 0.4, 0.2, 0.98, 0.98)
+  return(g_total)
+
+  
+}
+
+# Show examples for every subtype
+for (i in significant_distanceFeatures){
+    print(showDistanceCurves(allparameters_VS, 'Vascular stroma', i))
+}
+
+```
+
+
+

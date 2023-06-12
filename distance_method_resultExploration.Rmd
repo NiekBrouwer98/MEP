@@ -17,7 +17,7 @@ params:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Density feature exploration
+## Distance feature exploration
 This document analyses the distance features as computed in the distance_method_implementation.Rmd file.
 
 
@@ -25,7 +25,6 @@ This document analyses the distance features as computed in the distance_method_
 library(here)
 library(ggplot2)
 library(tidyverse)
-library(fst)
 source(here("UtilityFunctions.R"))
 source(here("MEP_UtilityFunctions.R"))
 library(factoextra)
@@ -37,22 +36,18 @@ library(ComplexHeatmap)
 library(tidyHeatmap)
 library(umap)
 library(circlize)
-library(dplyr)
-library(ggsignif)
-library(ggpubr)
-library(matrixStats)
-library(data.table)
 
 clinical_data <- getClinical()
 ```
 
-## feature estimation percentages
+## Feature estimations & Filtering
 
 Compute feature estimation percentages for filter purposes.
 Order features based on the max value, to maintain features that are specific for a single subtype.
 
 ```{r}
 shape_matrix <- getShapeFeatures()
+print(paste('percentage unestimated:', 100*sum(is.na(shape_matrix))/(nrow(shape_matrix)*ncol(shape_matrix))))
 sub_clinical_data <- clinical_data %>% dplyr::select(c(`ImageNumber`,`PAM50`))
 
 shape_matrix_withlabels <- merge(shape_matrix, sub_clinical_data, by.x = 'tnumber', by.y='ImageNumber', all.x=T)
@@ -65,8 +60,8 @@ for (s in 1:length(subtypes)){
   estimation_count <-  1- (na_count / nrow(shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]])))
   estimation_count <- data.frame(estimation_count)
   estimations <- cbind(estimations, estimation_count)
+}
 
-  }
 estimations <- setNames(estimations, subtypes)
 estimations <- estimations[!(row.names(estimations) %in% c("tnumber","PAM50")),]
 estimations <- estimations%>% mutate(row_wise_max = rowMaxs(as.matrix(estimations)))
@@ -77,160 +72,178 @@ saveRDS(estimations, file=here('scratch/estimationCounts.rds'))
 
 ```
 
-## Heatmap
-What patterns in the parameters do we find?
-
 ```{r}
-col_fun = colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
-
-generate_hm <- function(m, hm_name, n_clust, cluster_rows, cluster_columns,fontsize_rows, fontsize_columns, row_title, column_title){
-  ht <- Heatmap(as.matrix(m), name = paste(hm_name,'features'), column_title = column_title, row_title = row_title, 
-                row_names_gp = gpar(fontsize=fontsize_rows), column_names_gp = gpar(fontsize=fontsize_columns), 
-                cluster_rows = cluster_rows, cluster_columns =  cluster_columns, row_km = n_clust,col=col_fun)
-
-  return(ht)
-}
-
-
-subtype_proportions <- function(clusters,label){
-  clinical_data <- clinical_data %>% mutate(cluster = NA)
-  for (i in 1:length(clusters)){
-    clinical_data <- clinical_data %>% mutate(cluster = ifelse(ImageNumber %in% clusters[[i]], as.character(names(clusters)[[i]]),cluster))
-  }
-  clinical_data <- clinical_data %>% drop_na(cluster)
-
-  lengths <- tibble(cluster = names(clusters), length = c(sapply(clusters, length)))
-
-  p <- ggplot() +
-    geom_bar(data=clinical_data, aes(x= 'ALL', y= length(data),fill=get(label)),stat='identity',position='fill')  +
-    geom_text(data=lengths, aes(x='ALL',y=1,label = sum(lengths$length)), vjust = -1, size=3) +
-    geom_bar(data=clinical_data,aes(x= cluster, y= length(data),fill=get(label)),stat='identity',position='fill') +
-    geom_text(data=lengths, aes(x=cluster,y=1,label = length), vjust = -1, size=3) +
-    xlab('cluster') + ylab('proportion') + theme_bw() +ylim(0,1.2)
-  return(p)
-}
-
-generate_labels <- function(matrix){
-  labels <- merge(as_tibble(rownames(matrix)), clinical_data, by.x='value', by.y='ImageNumber', all.x=T) %>% 
-    rename(tnumber = value) %>% mutate(tnumber = as.numeric(tnumber))
-  labels <- labels %>%
-    mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
-    mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
-    mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
-    mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
-    mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
-
-colnames(labels) <- gsub(" ", "_", colnames(labels))
- return(labels) 
-}
-
-```
-
-Generate heatmaps of shape and scale features.
-
-Some features are rarely estimated, these should be filtered. Initially we filtered out features that occured in <50% of the samples.  This favors features in luminal A and B cells because these groups are large. Therefore we look at the estimations per subtype.
-
-```{r}
-shape_matrix <- getShapeFeatures()
+shape_matrix <- getShapeFeaturesAlternative()
+print(paste('percentage unestimated:', 100*sum(is.na(shape_matrix))/(nrow(shape_matrix)*ncol(shape_matrix))))
 sub_clinical_data <- clinical_data %>% dplyr::select(c(`ImageNumber`,`PAM50`))
 
 shape_matrix_withlabels <- merge(shape_matrix, sub_clinical_data, by.x = 'tnumber', by.y='ImageNumber', all.x=T)
 subtypes <- setdiff(unique(shape_matrix_withlabels %>% pull(`PAM50`)), c(NA))
 
-result <- tibble(features = colnames(shape_matrix_withlabels))
+estimationsAlternative <- data.frame(matrix(ncol=0, nrow=ncol(shape_matrix_withlabels)))
 for (s in 1:length(subtypes)){
   subset <- shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]])
-  na_count <-sapply(shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]]), function(y) sum(length(which(!is.na(y)))))
-  na_count <- as.numeric(na_count / nrow(shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]])))
-  na_count <- data.table(na_count)
-  result <- cbind(result, na_count)
-}
+  na_count <-sapply(shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]]), function(y) sum(length(which(is.na(y)))))
+  estimation_count <-  1- (na_count / nrow(shape_matrix_withlabels %>% filter(`PAM50` ==subtypes[[s]])))
+  estimation_count <- data.frame(estimation_count)
+  estimationsAlternative <- cbind(estimationsAlternative, estimation_count)
 
-colnames(result) <- c('feature', subtypes)
-result <- head(result, - 1)
-result <- result[-1,]
+  }
+estimationsAlternative <- setNames(estimationsAlternative, subtypes)
+estimationsAlternative <- estimationsAlternative[!(row.names(estimationsAlternative) %in% c("tnumber","PAM50")),]
+estimationsAlternative <- estimationsAlternative%>% mutate(row_wise_max = rowMaxs(as.matrix(estimationsAlternative)))
+estimationsAlternative <- estimationsAlternative %>% filter(row_wise_max != 0)
+estimationsAlternative <- estimationsAlternative %>% arrange(desc(row_wise_max)) %>% mutate(rank = row_number()) %>% mutate(rank_percentage = 100* (rank / nrow(estimationsAlternative)))
 
-result <- result[order(result$feature),]
+saveRDS(estimationsAlternative, file=here('scratch/estimationCountsAlternative.rds'))
 
-rownames(result) <- result$feature
-result <- result[,-1]
+```
+What happens to the percentage of unestimated parameters if we remove combinations with very rare cell types.
+```{r}
+n = 0.1
+rare_combinations <- rownames(estimations %>% filter(row_wise_max < n))
+print(paste('percentage of rare combinations:',100*length(rare_combinations)/ncol(getShapeFeatures())))
+shape_matrix <- getShapeFeatures() %>% select(-all_of(rare_combinations))
+print(paste('percentage unestimated:', 100*sum(is.na(shape_matrix))/(nrow(shape_matrix)*ncol(shape_matrix))))
 
-h <- Heatmap(result,name='estimated percentage', cluster_columns = F, cluster_rows = F,row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15))
-save_pdf(h, here('output/Distance_results/Missing_estimations_analysis/not_estimated_per_subtype.pdf'),width=5, height=40)
+
+rare_combinations <- rownames(estimationsAlternative %>% filter(row_wise_max < n))
+print(paste('percentage of rare combinations:', 100*length(rare_combinations)/ncol(getShapeFeaturesAlternative())))
+shape_matrix <- getShapeFeaturesAlternative() %>% select(-all_of(rare_combinations))
+print(paste('percentage unestimated:', 100*sum(is.na(shape_matrix))/(nrow(shape_matrix)*ncol(shape_matrix))))
+
 ```
 
 
+
+## Heatmap
+
+### Cohort-wide
+Remove very rare combinations.
+
 ```{r}
-shape_matrix <- generate_matrix(getShapeFeatures(),'tnumber',NULL,0.5, scale_rows = TRUE)
-scale_matrix <- generate_matrix(getScaleFeatures(),'tnumber',NULL,0.5, scale_rows = TRUE)
+col_fun = colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
+dominant_combinations_shape <- rownames(estimations %>% filter(row_wise_max > 0.5))
+dominant_combinations_scale <- rownames(estimations %>% filter(row_wise_max > 0.5))
 
-shape_hm <- generate_hm(shape_matrix,'shape',20, TRUE, TRUE, 2,8,'samples', 'combinations')
-scale_hm <- generate_hm(scale_matrix,'scale',20, TRUE, TRUE, 2,8,'samples', 'combinations')
+shape_features <- getShapeFeatures() %>% select(c('tnumber', dominant_combinations_shape)) %>% rename_with(~paste(., '_shape',sep=''))
+scale_features <- getScaleFeatures() %>% select(c('tnumber', dominant_combinations_scale)) %>% rename_with(~paste(., '_scale',sep=''))
+distance_features <- merge(shape_features,scale_features, by.x='tnumber_shape', by.y='tnumber_scale')
+distance_matrix <- generate_matrix(distance_features,'tnumber_shape')
 
-save_pdf(shape_hm, here('output/Method_comparison/heatmaps/shape_heatmap.pdf'), width=20, height=12)
-save_pdf(scale_hm, here('output/Method_comparison/heatmaps/scale_heatmap.pdf'), width=20, height=12)
+density_hm <- Heatmap(as.matrix(distance_matrix),name='shape and scale', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=2),cluster_rows = T, cluster_columns = T, col=col_fun)
 
-ht = draw(shape_hm)
-cl = row_order(ht)
-print(subtype_proportions(cl,'PAM50') + ggtitle('PAM50 subtype proportion in clusters'))
+save_pdf(density_hm, here('output/Method_comparison/heatmaps/shapeAndScale_heatmap.pdf'), width=10, height=10)
 
-ggsave(here('output/Method_comparison/heatmaps/subtypes_in_clusters_shape.pdf'))
-
-ht = draw(scale_hm)
-cl = row_order(ht)
-print(subtype_proportions(cl,'PAM50')  + ggtitle('PAM50 subtype proportion in clusters'))
-
-ggsave(here('output/Method_comparison/heatmaps/subtypes_in_clusters_scale.pdf'))
 ```
 
-## Heatmap per PAM50 subtype
 ```{r}
+dominant_combinations_shape <- rownames(estimationsAlternative %>% filter(row_wise_max > 0.5))
+dominant_combinations_scale <- rownames(estimationsAlternative %>% filter(row_wise_max > 0.5))
 
-shape_matrix$tnumber <- rownames(shape_matrix)
-scale_matrix$tnumber <- rownames(scale_matrix)
-shape_matrix_withlabels <- merge(shape_matrix, clinical_data%>% select(ImageNumber, PAM50 ), by.x='tnumber', by.y='ImageNumber')
-scale_matrix_withlabels <- merge(scale_matrix, clinical_data%>% select(ImageNumber, PAM50 ), by.x='tnumber', by.y='ImageNumber')
-shape_matrix_withlabels <- shape_matrix_withlabels %>% select(-c(tnumber))
-scale_matrix_withlabels <- scale_matrix_withlabels %>% select(-c(tnumber))
+shape_features <- getShapeFeaturesAlternative() %>% select(c('tnumber', dominant_combinations_shape)) %>% rename_with(~paste(., '_shape',sep=''))
+scale_features <- getScaleFeaturesAlternative() %>% select(c('tnumber', dominant_combinations_scale)) %>% rename_with(~paste(., '_scale',sep=''))
+distance_features <- merge(shape_features,scale_features, by.x='tnumber_shape', by.y='tnumber_scale')
+distance_matrixAlternative <- generate_matrix(distance_features,'tnumber_shape')
 
-subtypes <- setdiff(unique(clinical_data %>% pull(`PAM50`)), c(NA))
-shape_result <- tibble(features = colnames(shape_matrix_withlabels)[1:ncol(shape_matrix_withlabels)])
-for (s in 1:length(subtypes)){
-  subset <- t(shape_matrix_withlabels %>% filter(`PAM50` == subtypes[[s]]))
-  subset <- subset[1:ncol(shape_matrix_withlabels),]
-  subset_m <- matrix(as.numeric(subset),    # Convert to numeric matrix
-                    ncol = ncol(subset))
-  means <- rowMeans(subset_m)
-  shape_result <- cbind(shape_result, means)
+density_hm <- Heatmap(as.matrix(distance_matrixAlternative),name='shape and scale', column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=2),cluster_rows = T, cluster_columns = T, col=col_fun)
+
+save_pdf(density_hm, here('output/Method_comparison/heatmaps/shapeAndScale_heatmap_alternative.pdf'), width=10, height=10)
+```
+
+
+### Molecular subtypes
+
+```{r}
+subtypes <- setdiff(unique(merge(distance_matrix, clinical_data, by.x='row.names', by.y='ImageNumber', all.x=T) %>% pull("ER_HER2_status")),NA)
+
+for (s in subtypes){
+  samples_cellPHenotypes <- distance_matrix %>% filter(rownames(distance_matrix) %in% (clinical_data %>% filter(`ER_HER2_status` == s) %>% pull(`ImageNumber`)))
+
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=3),cluster_rows = T, cluster_columns = T, col=col_fun)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/molecularSubtype_heatmaps/'),'shapeAndScale_heatmap_',gsub('+', 'pos', s,fixed=T),'.pdf',sep=''), width=10, height=10)
+  
+  samples_cellPHenotypesAlternative <- distance_matrixAlternative %>% filter(rownames(distance_matrixAlternative) %in% (clinical_data %>% filter(`ER_HER2_status` == s) %>% pull(`ImageNumber`)))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypesAlternative),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=3),cluster_rows = T, cluster_columns = T, col=col_fun)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/molecularSubtype_heatmaps/'),'shapeAndScale_heatmap_',gsub('+', 'pos', s,fixed = T),'_alternative.pdf',sep=''), width=10, height=10)
+
+  
+}
+```
+
+### PAM50 subtypes
+
+```{r}
+subtypes <- setdiff(unique(merge(distance_matrix, clinical_data, by.x='row.names', by.y='ImageNumber', all.x=T) %>% pull("PAM50")),NA)
+
+for (s in subtypes){
+  samples_cellPHenotypes <- distance_matrix %>% filter(rownames(distance_matrix) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`)))
+
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypes),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=3),cluster_rows = T, cluster_columns = T, col=col_fun)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/PAM50_heatmaps/'),'shapeAndScale_heatmap_',gsub('+', 'pos', s,fixed=T),'.pdf',sep=''), width=10, height=10)
+  
+  samples_cellPHenotypesAlternative <- distance_matrixAlternative %>% filter(rownames(distance_matrixAlternative) %in% (clinical_data %>% filter(`PAM50` == s) %>% pull(`ImageNumber`)))
+
+  subtype_hm <- Heatmap(as.matrix(samples_cellPHenotypesAlternative),name=paste(s, 'samples'), column_title = 'cell type', 
+                      row_title = 'sample', row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=3),cluster_rows = T, cluster_columns = T, col=col_fun)
+  
+  save_pdf(subtype_hm, paste(here('output/Method_comparison/heatmaps/PAM50_heatmaps/'),'shapeAndScale_heatmap_',gsub('+', 'pos', s,fixed = T),'_alternative.pdf',sep=''), width=10, height=10)
+
+  
+}
+```
+
+## PCA
+
+```{r}
+generate_labels <- function(matrix){
+labels <- merge(x = as_tibble(rownames(matrix)), y = clinical_data, by.x='value', by.y='ImageNumber', all.x=T)
+labels <- labels %>% rename(ImageNumber = value)
+# %>%
+#   mutate(HER = ifelse(PAM50=='Her2', 'HER2', 'Other')) %>%
+#   mutate(LuminalA = ifelse(PAM50=='LumA', 'Luminal A', 'Other')) %>%
+#   mutate(LuminalB = ifelse(PAM50=='LumB', 'Luminal B', 'Other')) %>%
+#   mutate(Bas = ifelse(PAM50=='Basal', 'Basal', 'Other')) %>%
+#   mutate(Norm= ifelse(PAM50=='Normal', 'Normal', 'Other'))
+
+colnames(labels) <- gsub(" ", "_", colnames(labels))
+return(labels)
+}
+
+plot_pca <- function(matrix, label){
+  labels = generate_labels(matrix)
+  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
+  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'ImageNumber'
+  matrix_withlabels <- merge(matrix_withlabels, labels, by='ImageNumber', all.x=T)
+
+  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
+  print(fviz_eig(res.pca))
+  print(fviz_pca_biplot(res.pca, label="var", habillage=matrix_withlabels %>% pull(!!label), addEllipses = T, ellipse.level = 0.95,select.var = list(contrib = 5) ))
   
 }
 
-colnames(shape_result) <- c('feature', subtypes)
-shape_result <- shape_result[order(shape_result$feature),]
-rownames(shape_result) <- shape_result$feature
-shape_result <- shape_result[,-1]
+plot_pca(distance_matrix %>% filter(!(row.names(distance_matrix) %in% getNonTumourImages())), 'PAM50')
+ggsave(here('output/Method_comparison/pca/pca_shapeAndScale_PAM50.pdf'),width=8,height=7)
 
-h <- Heatmap(shape_result,name='mean shape parameter', cluster_columns = F, cluster_rows = F,row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15))
-save_pdf(h, here('output/Distance_results/mean_shape_per_subtype.pdf'),width=5, height=40)
+plot_pca(distance_matrixAlternative %>% filter(!(row.names(distance_matrixAlternative) %in% getNonTumourImages())), 'PAM50')
+ggsave(here('output/Method_comparison/pca/pca_shapeAndScale_PAM50_alternative.pdf'),width=8,height=7)
 
-scale_result <- tibble(features = colnames(scale_matrix_withlabels)[1:ncol(scale_matrix_withlabels)])
-for (s in 1:length(subtypes)){
-  subset <- t(scale_matrix_withlabels %>% filter(`PAM50` == subtypes[[s]]))
-  subset <- subset[1:ncol(scale_matrix_withlabels),]
-  subset_m <- matrix(as.numeric(subset),    # Convert to numeric matrix
-                    ncol = ncol(subset))
-  means <- rowMeans(subset_m)
-  scale_result <- cbind(scale_result, means)
-  
-}
+plot_pca(distance_matrix %>% filter(!(row.names(distance_matrix) %in% getNonTumourImages())), "ER_HER2_status")
+ggsave(here('output/Method_comparison/pca/pca_shapeAndScale_ERHer2.pdf'),width=8,height=7)
 
-colnames(scale_result) <- c('feature', subtypes)
-scale_result <- scale_result[order(scale_result$feature),]
-rownames(scale_result) <- scale_result$feature
-scale_result <- scale_result[,-1]
-
-h <- Heatmap(scale_result,name='mean scale parameter', cluster_columns = F, cluster_rows = F,row_names_gp = gpar(fontsize=2), column_names_gp = gpar(fontsize=15))
-save_pdf(h, here('output/Distance_results/mean_scale_per_subtype.pdf'),width=5, height=40)
+plot_pca(distance_matrixAlternative %>% filter(!(row.names(distance_matrixAlternative) %in% getNonTumourImages())),"ER_HER2_status")
+ggsave(here('output/Method_comparison/pca/pca_shapeAndScale_ERHer2_alternative.pdf'),width=8,height=7)
 ```
 
 ## UMAP
@@ -259,46 +272,10 @@ generate_UMAP <- function(matrix, title){
       subtitle = title))
 }
 
-print(generate_UMAP(shape_matrix,'UMAP plot of shape parameters'))
-print(generate_UMAP(scale_matrix,'UMAP plot of scale parameters'))
+print(generate_UMAP(distance_matrixAlternative,'UMAP plot of shape parameters'))
+# print(generate_UMAP(scale_matrix,'UMAP plot of scale parameters'))
 ```
 
 
-## PCA
-PCA of samples based on parameter features. We only consider features which are estimated in more than 50% of the samples. 
-
-```{r}
-plot_pca <- function(matrix, label){
-  labels = generate_labels(matrix)
-  matrix_withlabels <- cbind.data.frame(matrix, rownames(matrix))
-  colnames(matrix_withlabels)[ncol(matrix_withlabels)] = 'tnumber'
-  matrix_withlabels <- merge(matrix_withlabels, labels, by='tnumber', all.x=T)
-
-  res.pca <- prcomp(matrix_withlabels %>% select(-colnames(labels)), scale = FALSE)
-  print(fviz_eig(res.pca))
-  p2 <- fviz_pca_biplot(res.pca, label="var", habillage=matrix_withlabels %>% pull(!!label), addEllipses = T, ellipse.level = 0.95,select.var = list(contrib = 5))
-    
-  print(p2)
-  return(p2)
-}
-
-shape_matrix <- generate_matrix(getShapeFeatures(),'tnumber',NULL,0.5, scale_rows = TRUE)
-scale_matrix <- generate_matrix(getScaleFeatures(),'tnumber',NULL,0.5, scale_rows = TRUE)
-
-pca_shape <- plot_pca(shape_matrix, "PAM50")
-ggsave(here('output/Method_comparison/pca/pca_shape.pdf'),width=10, height=10)
-pca_scale <- plot_pca(scale_matrix, 'PAM50')
-ggsave(here('output/Method_comparison/pca/pca_scale.pdf'),width=10, height=10)
-
-```
-
-There is no clear separation of cell types.
-Look at Intclusts as well.
-
-```{r}
-pca_shape <- plot_pca(shape_matrix, "IntClust")
-ggsave(here('output/Method_comparison/pca/pca_shape_IntClust.pdf'),width=10, height=10)
-pca_scale <- plot_pca(scale_matrix, 'IntClust')
-ggsave(here('output/Method_comparison/pca/pca_scale_IntClust.pdf'),width=10, height=10)
 ```
 
