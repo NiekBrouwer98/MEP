@@ -1,0 +1,219 @@
+---
+title: "Clinical subtype heatmaps"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+library(data.table)
+
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here("figure_styling.R"))
+```
+
+```{r, include=FALSE}
+cells_original <- getCells()
+cells <- getCellsAlternative()
+cell_counts <- getCellCounts(cells)
+clinical_data <- getClinical()
+
+projectPanel <- getPanel()
+
+cell_labels <- alternativeCellTypeLabels()
+cell_labels_original <- originalCellTypeLabels()
+
+cell_densities <- getCellProportionsPerImageAlternative()
+cell_densities_original <- getCellProportionsPerImage()
+
+```
+
+
+In this notebook we generate the figures shown in section 4.2 of the thesis report.
+
+## ER and HER2 expression 
+
+Expression in cell types.
+
+```{r}
+# Rescale and clip data
+median_expression <- cells_original %>% dplyr::select(setdiff(c('meta_description','DNA1', projectPanel$all_channels), '')) %>% group_by(meta_description)  %>% 
+   summarise_at(vars(setdiff(c('DNA1', projectPanel$all_channels), '')), median)
+
+median_expression <- data.frame(median_expression)
+rownames(median_expression) <- median_expression$meta_description
+median_expression <- median_expression[c("ER^{hi}CXCL12^{+}","CK8-18^{+} ER^{hi}","HER2^{+}","CK8-18^{hi}ER^{lo}","CK^{+} CXCL12^{+}","CK8-18^{hi}CXCL12^{hi}","Basal","Ep CD57^{+}","CD15^{+}","CK^{med}ER^{lo}","CK^{lo}ER^{lo}","CK^{lo}ER^{med}","MHC I^{hi}CD57^{+}", "MHC I & II^{hi}","MHC^{hi}CD15^{+}","Endothelial","Fibroblasts","Fibroblasts FSP1^{+}","Myofibroblasts","Myofibroblasts PDPN^{+}","Granulocytes","Macrophages & granulocytes","Macrophages","Ep Ki67^{+}","Ki67^{+}","B cells","CD4^{+} T cells","CD4^{+} T cells & APCs","T_{Reg} & T_{Ex}","CD8^{+} T cells","CD38^{+} lymphocytes","CD57^{+}"),]
+
+rownames(median_expression) <- merge( tibble(name = rownames(median_expression)), cell_labels_original, by='name',sort=F) %>% pull(conversion)
+median_expression <- median_expression %>% dplyr::select(-c('meta_description'))
+median_expression <- scale(median_expression)
+colnames(median_expression) <- gsub('.', '',colnames(median_expression),fixed=T)
+
+split = c(rep(1,3),rep(2,6),rep(3,1),rep(4,2),rep(5,3),rep(6,1),rep(7,2),rep(8,2),rep(9,3),rep(10,2),rep(11,1),rep(12,2),rep(13,2),rep(14,1),rep(15,1))
+split_labels = c("CK+ ERHER2+ cells","CK+ ERHER2- cells", "", "CK- cells", "CK- MHC+ cells", "", "Fibroblasts", "Myofibroblasts", "Granylocytes & Macrophages", "Ki67+ cells", "", "CD4+ cells & APCs", "CD8+ cells", "", "")
+ha = rowAnnotation(
+    foo = anno_block(gp = gpar(color = 1:15), labels = split_labels,, 
+        labels_gp = gpar(col = "black", fontsize = 5)))
+
+hm1 <- Heatmap(median_expression, row_labels = sapply(rownames(median_expression), latex2exp::TeX),cluster_rows = F,right_annotation = ha,row_split=split, col = heatmapColorScale(-4,4))
+
+save_pdf(hm1, filename = here('output/final_figures/expression_profiles_originalCells.pdf'),width = 12, height=12)
+
+
+```
+
+```{r}
+cells_withsubtypes <- merge(cells, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(meta_description %in% c("CKmed_ERorHER2-_cells", "CK+_ERorHER2+_cells","CK+_ERorHER2-_cells"))
+median_expression <- cells_withsubtypes %>% dplyr::select(setdiff(c('PAM50','DNA1', projectPanel$all_channels), '')) %>% group_by(PAM50)  %>% 
+   summarise_at(vars(setdiff(c('DNA1', projectPanel$all_channels), '')), median)
+
+median_expression <- data.frame(median_expression)
+rownames(median_expression) <- median_expression$PAM50
+colnames(median_expression) <- gsub('.', '',colnames(median_expression),fixed=T)
+
+median_expression <- median_expression %>% dplyr::select(-c('PAM50')) %>% dplyr::select(c("panCK", "CK818","CK5", "HER2D8F12","HER23B5","ER"))
+
+median_expression <- scale(median_expression)
+
+hm1 <- Heatmap(median_expression,name = 'normalized \n median expression',cluster_columns = F, cluster_rows = F, col = heatmapColorScale(-2,2))
+
+save_pdf(hm1, filename = here('output/final_figures/expression_profiles_subtypes.pdf'),width = 8, height=6)
+```
+
+## Cell Type Fractions
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+
+median_fractions <- median_fractions %>% dplyr::select(c('PAM50',grep('CK',colnames(median_fractions), value = T, fixed=T)))
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+hm1 <- Heatmap(median_fractions,name = 'normalized \n median fractions',cluster_columns = T,cluster_rows=F,column_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(min(median_fractions),max(median_fractions)))
+
+save_pdf(hm1, filename = here('output/final_figures/tumorfractions_subtypes.pdf'),width = 6, height=5)
+
+```
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+
+median_fractions <- median_fractions %>% dplyr::select(c('PAM50',grep('CK',colnames(median_fractions), value = T, fixed=T,invert = T)))
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+hm1 <- Heatmap(median_fractions,name = 'normalized \n median fractions',cluster_columns = T,cluster_rows=F,column_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(min(median_fractions),max(median_fractions)))
+
+save_pdf(hm1, filename = here('output/final_figures/tmefractions_subtypes.pdf'),width = 6, height=5)
+
+```
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities_original, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+median_fractions <- median_fractions %>% dplyr::select(c('PAM50',getTumorAndTMETypes()$tumor_types))
+
+# median_fractions <- median_fractions[,c('PAM50', "ER^{hi}CXCL12^{+}","CK8-18^{+} ER^{hi}","HER2^{+}","CK8-18^{hi}ER^{lo}","CK^{+} CXCL12^{+}","CK8-18^{hi}CXCL12^{hi}","Basal","Ep CD57^{+}","CD15^{+}","CK^{med}ER^{lo}","CK^{lo}ER^{lo}","CK^{lo}ER^{med}","MHC I^{hi}CD57^{+}", "MHC I & II^{hi}","MHC^{hi}CD15^{+}","Endothelial","Fibroblasts","Fibroblasts FSP1^{+}","Myofibroblasts","Myofibroblasts PDPN^{+}","Granulocytes","Macrophages & granulocytes","Macrophages","Ep Ki67^{+}","Ki67^{+}","B cells","CD4^{+} T cells","CD4^{+} T cells & APCs","T_{Reg} & T_{Ex}","CD8^{+} T cells","CD38^{+} lymphocytes","CD57^{+}")]
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels_original, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+hm1 <- Heatmap(median_fractions,name = 'normalized \n median fractions',cluster_columns = T,cluster_rows=F,column_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(min(median_fractions),max(median_fractions)))
+
+save_pdf(hm1, filename = here('output/final_figures/tumorfractions_subtypes_original.pdf'),width = 6, height=5)
+
+```
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities_original, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+median_fractions <- median_fractions %>% dplyr::select(c('PAM50',getTumorAndTMETypes()$TME_types))
+
+# median_fractions <- median_fractions[,c('PAM50', "ER^{hi}CXCL12^{+}","CK8-18^{+} ER^{hi}","HER2^{+}","CK8-18^{hi}ER^{lo}","CK^{+} CXCL12^{+}","CK8-18^{hi}CXCL12^{hi}","Basal","Ep CD57^{+}","CD15^{+}","CK^{med}ER^{lo}","CK^{lo}ER^{lo}","CK^{lo}ER^{med}","MHC I^{hi}CD57^{+}", "MHC I & II^{hi}","MHC^{hi}CD15^{+}","Endothelial","Fibroblasts","Fibroblasts FSP1^{+}","Myofibroblasts","Myofibroblasts PDPN^{+}","Granulocytes","Macrophages & granulocytes","Macrophages","Ep Ki67^{+}","Ki67^{+}","B cells","CD4^{+} T cells","CD4^{+} T cells & APCs","T_{Reg} & T_{Ex}","CD8^{+} T cells","CD38^{+} lymphocytes","CD57^{+}")]
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels_original, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+hm1 <- Heatmap(median_fractions,name = 'normalized \n median fractions',cluster_columns = T,cluster_rows=F,column_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(min(median_fractions),max(median_fractions)))
+
+save_pdf(hm1, filename = here('output/final_figures/tmefractions_subtypes_original.pdf'),width = 6, height=5)
+
+```
+
+## Fractions per sample
+
+
+
+## Spatial relationships
+
+```{r}
+
+```
+

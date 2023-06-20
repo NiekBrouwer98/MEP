@@ -60,8 +60,25 @@ allCombinations <- merge(x = allCombinations,
                          by = 'meta_description') 
 cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
                         by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+# cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
 cPh_tumour <- cellPhenotypes[type == 'tumour', unique(meta_description)]
 cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+
+cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+                         y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+                         by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+                        by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+cellPhenotypes[, meta_description := gsub("[^A-Za-z0-9+\\-]", "", meta_description)]
+cellPhenotypes[, meta_description := paste0(meta_description, '_originalType')]
+cPh_tumour_original <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme_original <- cellPhenotypes[type == 'stroma', unique(meta_description)]
 
 nwP <- here('scratch/NetworkProperties.rds')
 nwP <- read_rds(nwP)
@@ -92,9 +109,7 @@ rm(nwP, cellPhenotypes)
 
 shapePredictors <- grep('shape', colnames(toModel), value = T)
 scalePredictors <- grep('scale', colnames(toModel), value = T)
-distPredictors <- grep('shape|scale', colnames(toModel), value = T)
-AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
-all_predictors <- list(cPh_tumour, cPh_tme, TMEStructurePredictors,	nwPredictorsTumour, nwPredictorsTME, shapePredictors, scalePredictors, distPredictors, AllPredictors)
+
 ```
 
 ```{r}
@@ -114,18 +129,36 @@ createOrdinalPredictor <- function(df, predictor, categories){
 
 createBinaryPredictor <- function(df){
   df <- df %>%
-  mutate_at(vars(-c('yearsToStatus', 'DeathBreast')), ~ifelse(. > 0, 1, 0))
-  return(df)
+  mutate_at(vars(-c('yearsToStatus', 'DeathBreast')), ~ifelse(. > 0.1, 1, 0)) 
+  
+  # Columns to exclude from casting to factors
+  exclude_cols <- c("yearsToStatus", "DeathBreast")
+  
+  # Cast all columns to factors except for specified columns
+  converted_df <- df %>%
+    mutate_at(vars(-one_of(exclude_cols)), as.factor)
+
+  return(converted_df)
 }
 
 createBinaryPredictorWithMedian <- function(df){
-df_binarized <- df %>%
+df <- df %>%
   mutate(across(
     setdiff(names(.), c('yearsToStatus', 'DeathBreast')),
     ~as.integer(. >= median(.))
   ))
 
-  return(df_binarized)
+  # Columns to exclude from casting to factors
+  exclude_cols <- c("yearsToStatus", "DeathBreast")
+  
+  df <- df %>%
+  dplyr::select(where(~ !(all(. == 0) || all(. == 1))))
+  
+  # Cast all columns to factors except for specified columns
+  converted_df <- df %>%
+    mutate_at(vars(-one_of(exclude_cols)), as.factor)
+
+  return(converted_df)
 }
 
 ```
@@ -140,72 +173,52 @@ getRandomColour <- function(n) {
   return(random_colors)
 }
 
-# survPlot <- function(
-#    survFit, # a -survfit()- object
-#    Dt, # dt 
-#    colours = NULL, # vector of colours for lines
-#    legendTextSize = 11,
-#    xlab = 'Follow-up (years)',
-#    ylab = 'Cumulative survival',
-#    xlimits = c(0,20)
-#    ){
-# 
-#    nPatients <- summary(survFit)$table[,'records']
-#    nEvents <- summary(survFit)$table[,'events']
-#    mklegendAnnot <- function(pos){
-#       legend <- paste0('(', nPatients[pos], '/', nEvents[pos], ')')
-#       legendName <- gsub('^[A-Za-z0-9].*=', '', names(nPatients)[pos])
-#       legend <- paste(legendName, legend)
-#       return(legend)
-#    }
-#    nGroups <- seq_len(length(nPatients))
-#    legendLabs <- sapply(nGroups, mklegendAnnot)
-#    if(is.null(colours)) colours <- getRandomColour(length(nGroups))
-# 
-#    p <- ggsurvplot(survFit, data = Dt, 
-#       pval = T, pval.coord = c(0.01, 0.01),
-#       legend = c(0.75, 0.9), legend.title = 'Group (Patients/Events)',
-#       legend.labs = legendLabs,
-#       censor = F,
-#       palette = colours,
-#       xlim = xlimits)$plot
-#    p <- p + labs(x = xlab, y = ylab) +
-#    theme(legend.text = element_text(size = legendTextSize), 
-#       legend.title = element_text(size = legendTextSize),
-#       legend.box.background = element_blank(),
-#       legend.background = element_blank()) 
-#    return(p)
-# }
-
-
-mkSurvPlot <- function(df, predictor, ER = NULL){
-  Dt <- df %>% rename(predictor_column = predictor)
+subsetDF <- function(Dt, ER = NULL){
    if(!is.null(ER)) {
       if(grepl('ositive|\\+', ER)) {
-         Dt <- Dt[`ER Status` == 'Positive']
+         Dt <- Dt[`ERStatus` == 'Positive']
          suffix <- 'ERpos'
       }else{
-         Dt <- Dt[`ER Status` == 'Negative']
+         Dt <- Dt[`ERStatus` == 'Negative']
          suffix <- 'ERneg'
       }
    }
    else suffix <- 'AllPts'
    
-    res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor_column, data = Dt)
-    if (as.numeric(summary(res.cox)[["coefficients"]][[5]]) < 0.05){
-        p <- predictor
-        g1 <- ggsurvplot(survfit(res.cox),data=Dt,risk.table = T) + ggtitle(predictor)
-
-    }else{
-        p <- NULL
-        g1 <- (paste(predictor, 'is not significant'))
-
-    }
-
-    return(list(predictor = p,cox= g1))
+   return(Dt)
 }
 
-stratifiedPlot <- function(df, predictor, ER= NULL){
+cox <- function(df, ER = NULL){
+  df <- subsetDF(df, ER)
+  predictors <- setdiff(colnames(df), c('ERStatus','yearsToStatus', 'DeathBreast'))
+
+  res.cox <- coxph(as.formula(paste0("Surv(yearsToStatus, DeathBreast) ~ ", paste(predictors, collapse = " + "))), data = df)
+
+  return(res.cox)
+    
+}
+
+univariateCox <- function(df,predictor, ER = NULL){
+    df <- subsetDF(df, ER)
+    df <- df %>% rename(predictor_column = predictor)
+  res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor, data = df)
+  return(tidy(res.cox) %>% mutate(term = predictor))
+  # return(res.cox)
+
+}
+
+multivariateCox <- function(df, predictors, ER= NULL){
+  df <- subsetDF(df, ER)
+  x = df %>% dplyr::select(predictors)
+  y = Surv(df$yearsToStatus, df$DeathBreast)
+  cvfit <- cv.glmnet(as.matrix(x), y, family = "cox")
+  
+  return(cvfit)
+  
+}
+
+
+KMplot <- function(df, predictor, ER= NULL){
   
     Dt <- df %>% rename(predictor_column = predictor)
    if(!is.null(ER)) {
@@ -236,90 +249,72 @@ stratifiedPlot <- function(df, predictor, ER= NULL){
 ```
 
 
-For all samples
+For all samples.
+
 ```{r}
 ## Survival for density features
-densityDF <- TotalDF %>% dplyr::select(all_of(c('yearsToStatus', 'DeathBreast', cPh_tumour, cPh_tme)))
-sig_features <- c()
-for (feature in c(cPh_tme, cPh_tumour)){
-  plots <- mkSurvPlot(densityDF, feature)
-  sig_features <- c(sig_features, plots$predictor)
-  print(plots$cox)
-  
-}
+densityDF <- TotalDF %>% dplyr::select(all_of(c('ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme)))
+colnames(densityDF) <- gsub('+','plus', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub('-','min', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub('_','', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub(' ','', colnames(densityDF),fixed=T)
+densityDF <- createBinaryPredictorWithMedian(densityDF)
 
-# Survival for cell type being present or not
-BinarydensityDF <- createBinaryPredictor(densityDF)
-for (f in sig_features){
-  plot <- stratifiedPlot(BinarydensityDF, f)
-  print(plot + ggtitle(f))
-  
-}
-
-# Survival for cell type being present or not
-BinarydensityDF <- createBinaryPredictorWithMedian(densityDF)
-for (f in sig_features){
-  plot <- stratifiedPlot(BinarydensityDF, f)
-  print(plot + ggtitle(f))
-  
-}
-```
-```{r}
-distanceDF <- TotalDF %>% dplyr::select(all_of(c('yearsToStatus', 'DeathBreast', distPredictors)))
-sig_features <- c()
-for (feature in distPredictors){
-  plots <- mkSurvPlot(distanceDF, feature)
-  sig_features <- c(sig_features, plots$predictor)
-  # print(plots$cox)
-  
-}
-
-# Survival for cell type being present or not
-BinarydistanceDF <- createBinaryPredictorWithMedian(distanceDF)
-for (f in sig_features){
-  plot <- stratifiedPlot(BinarydistanceDF, f)
-  print(plot)
-  
-}
-```
-
-
-
-
-Split on ER status.
-```{r}
-densityDF <- TotalDF %>% dplyr::select(all_of(c('yearsToStatus', 'DeathBreast','ER Status', cPh_tumour, cPh_tme)))
-mkSurvPlot(densityDF, c(cPh_tme, cPh_tumour)[[3]], ER='Negative')
-mkSurvPlot(densityDF, c(cPh_tme, cPh_tumour)[[3]], ER='Positive')
-
+density_cox <- cox(densityDF)
+ggforest(density_cox,data = subsetDF(densityDF))
 ```
 
 ```{r}
-significantFeatures <- colnames(readRDS(here('scratch/significantFeatures.rds')))
+densityDF <- TotalDF %>% dplyr::select(all_of(c('ER Status','yearsToStatus', 'DeathBreast',cPh_tme_original, cPh_tumour_original)))
+colnames(densityDF) <- gsub('_originalType','', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub('+','plus', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub('-','min', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub('_','', colnames(densityDF),fixed=T)
+colnames(densityDF) <- gsub(' ','', colnames(densityDF),fixed=T)
+densityDF <- createBinaryPredictorWithMedian(densityDF)
 
-new_list <- c()  # Create an empty list to store the new strings
+density_cox <- cox(densityDF)
+ggforest(density_cox,data = subsetDF(densityDF))
+```
+## Distance features
 
-for (string in significantFeatures) {
-  if (grepl('_to_', string)) {
-    new_list <- c(new_list, paste0("shape_", string), paste0("scale_", string))
-  } else {
-    new_list <- c(new_list, string)
-  }
+```{r}
+distanceDF <- TotalDF %>% dplyr::select(all_of(c('ER Status','yearsToStatus', 'DeathBreast', shapePredictors, scalePredictors)))
+
+significant_features <- data.frame(matrix(nrow=0, ncol=5))
+for (p in c(shapePredictors, scalePredictors)){
+  significant_features <- rbind(significant_features, univariateCox(distanceDF,p))  
 }
+
+significant_features <- significant_features %>% filter(p.value < 0.05)
+
+ggplot(significant_features, aes(x = estimate, y = term)) +
+  geom_point() +
+  geom_errorbarh(aes(xmin = estimate - 2 * std.error, xmax = estimate + 2 * std.error)) +
+  geom_text(aes(x=2, y=term, label=format(round(p.value,3), scientific=T)),size=3) + 
+  geom_vline(xintercept = 0,linetype='longdash') +
+  labs(x = "Coefficient", y = "Variable") +
+  theme_minimal()
+
+ggsave(here('output/survival/significantDistanceCoefficients.pdf'),width=9,height=8)
 ```
 
 ```{r}
-DF <- TotalDF %>% dplyr::select(all_of(c('yearsToStatus', 'DeathBreast','ER Status', new_list)))
-for (i in 1:length(new_list)){
-  mkSurvPlot(DF, new_list[[i]])
-}
+distanceDF <- TotalDF %>% dplyr::select(all_of(c('ER Status','yearsToStatus', 'DeathBreast', shapePredictors)))
+distance_cox <- multivariateCox(distanceDF, shapePredictors)
+
+sds <- apply(toModel, 2, sd)
+stdDF <- tibble(var = colnames(toModel), std = sds)
+
+variables <- as.tibble(shapePredictors) %>% mutate(id = rownames(as.tibble(shapePredictors)))
+
+coefList <- as.data.frame(summary(coef(distance_cox,s=distance_cox[["lambda.min"]])))
+coefList <- merge(coefList, variables, all.x=T, by.x='i', by.y = 'id') %>% rename(var = value)
+
+coefList <- merge(coefList, stdDF, by='var', all.x=T)
+
+coefList <- coefList %>% mutate(std_val = x * std) %>% dplyr::select(-c('i','j','std'))
+
 ```
 
-```{r}
-DF <- TotalDF %>% dplyr::select(all_of(c('yearsToStatus', 'DeathBreast','ER Status', new_list)))
-for (i in 1:length(new_list)[1:50]){
-  mkSurvPlot(createOrdinalPredictor(DF,new_list[[i]],4),'ordinal_predictor',bins=seq(1,4))
-}
-
-```
 

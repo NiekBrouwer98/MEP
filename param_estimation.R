@@ -10,7 +10,7 @@ library(tictoc)
 library(doMC)
 
 cores = detectCores()
-registerDoMC(14)
+registerDoMC(cores=8)
 
 source(here("UtilityFunctions.R"))
 source(here("MEP_UtilityFunctions.R"))
@@ -21,15 +21,22 @@ library(R.utils)
 
 
 ###CONFIG
-name <- 'Vascular_stroma'
-distance_data <- here('scratch/AUCScaledSlides_300_VascularStroma.tsv')
-initial_params_folder <- paste(here('scratch/init_parameters_'),name, sep = '')
-cells <- readRDS(here('DATA/splittedCells_vascularStroma.rds')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
-outfile <- paste(here('scratch/success_models_'),name,sep='')
+# structure_type <- 'Vascular stroma'
+# structure_type <- 'Suppressed expansion' #REMOVE 'RUN2'
+# structure_type <- 'APC enriched'
+# structure_type <- 'Granulocyte enriched'
+structure_type <- "TLSlike"
+
+print(structure_type)
+
+distance_data <- paste(here('scratch/AUCScaledSlides_300_'),gsub(' ', '_', structure_type, fixed=T) ,'.tsv', sep='')
+initial_params_folder <- paste(here('scratch/init_parameters_'),gsub(' ', '_',structure_type,fixed=T), sep = '')
+cells <- readRDS(paste(here('DATA/splittedCells_'), gsub(' ','_', structure_type,fixed = T), '.rds',sep='')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
+outfile <- paste(here('scratch/success_models_'),gsub(' ', '_',structure_type,fixed=T),sep='')
 
 n_cells <- getCellCounts(cells) %>% dplyr::rename(phenotype = meta_description) %>% filter(n > 0)
 
-slides <- read_tsv(here('scratch/AUCScaledSlides_300_VascularStroma.tsv'))
+slides <- read_tsv(distance_data)
 ##
 
 # saveRDS(slides, file=here('scratch/AUCScaledSlides_300_ALL_run2.rds'))
@@ -42,13 +49,13 @@ combinations <- readRDS(here('scratch/combinations_selection_run2.rds'))
 
 # Directory for results
 # Directory for intermediate results
-if (!dir.exists(paste(here('scratch/success_models_'),name, sep = ''))){
-  dir.create(paste(here('scratch/success_models_'),name, sep = ''))
+if (!dir.exists(paste(here('scratch/success_models_'),gsub(' ', '_',structure_type,fixed=T), sep = ''))){
+  dir.create(paste(here('scratch/success_models_'),gsub(' ', '_',structure_type,fixed=T), sep = ''))
 }else{
   message("dir exists")
 }
 
-finished_files <- list.files(paste(here('scratch/success_models_'),name,'/', sep = ''))
+finished_files <- list.files(paste(here('scratch/success_models_'),gsub(' ', '_',structure_type,fixed=T),'/', sep = ''))
 finished_combinations_int <-  finished_files %>% str_replace("success_models_", "")
 finished_combinations_dir <- finished_combinations_int %>% str_replace(".rds", "")
 finished_combinations <- unique(finished_combinations_dir)
@@ -172,7 +179,7 @@ weib_coefs$phenotype_combo %<>% as.character()
 xy_data_weib <- xy_data %>% slice(0)
 xy_data_weib <- xy_data_weib %>% add_column(yhat=as.numeric())
 
-success_models <- mclapply(combinations_selection, mc.cores = 12, function(combi){
+success_models <- mclapply(combinations_selection, mc.cores = 8, function(combi){
   # Skip combinations that take to long to avoid hold-up
   for(threshold_cells in c(0, 5,10,20,50)){
       message(threshold_cells)

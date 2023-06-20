@@ -21,7 +21,7 @@ getPanel <- function(){
   }
   
   # Get data and generate vars
-  panel <- here('AbPanel.csv')
+  panel <- paste(gsub('/refactored_code', '', getwd(), fixed=T),'/DATA/AbPanel.csv', sep='')
   panel <- fread(panel)
   panel[, var_name := tolower(target)]  
   nicelabs("Histone H3", "hh3", "Histone H3")  
@@ -43,7 +43,7 @@ getPanel <- function(){
   nicelabs("c-erbB-2", "her2_3b5", "HER2 (3B5)", "3B5")  
   nicelabs("c-erbB-2", "her2_d8f12", "HER2 (D8F12)", "D8F12")  
   
-  panel[metaltatC == "Ir191", var_name := "DNA1"]  
+  panel[metaltag == "Ir191", var_name := "DNA1"]
   panel[metaltag == "Ir193", var_name := "DNA2"]
   panel[is.na(var_label), var_label := target]
   panel[var_label=="", var_label := var_name]

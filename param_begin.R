@@ -5,16 +5,6 @@ library(assertthat)
 source(here("UtilityFunctions.R"))
 library(tictoc)
 
-# Original classification
-# cells <- getCells()
-
-# Alternative classification
-# cells <- read_fst(here('DATA/SingleCells_altered.fst'))
-# phenotype_list <- get_phenotypes()
-
-# Use regional split
-cells <- readRDS(here('DATA/splittedCells_vascularStroma.rds'))
-
 library(tidyverse)
 library(ggpubr)
 library(readxl)
@@ -32,6 +22,26 @@ library(spatstat)
 # library(raster)
 library(gridExtra)
 library(data.table)
+
+
+# Original classification
+# cells <- getCells()
+
+# Alternative classification
+# cells <- read_fst(here('DATA/SingleCells_altered.fst'))
+# phenotype_list <- get_phenotypes()
+
+# Use regional split
+
+# structure_type <- 'Vascular stroma'
+# structure_type <- 'Suppressed expansion'
+# structure_type <- 'APC enriched'
+# structure_type <- 'Granulocyte enriched'
+structure_type <- "TLSlike"
+
+print(structure_type)
+
+cells <- readRDS(paste(here('DATA/splittedCells_'), gsub(' ','_', structure_type,fixed = T), '.rds',sep=''))
 
 
 # Rename labels to fit methods of Alberto
@@ -193,7 +203,7 @@ AUCScaledSlides_300 <- LongBinCounts_300 %>%
   dplyr::filter(n() >= 1) %>% 
   dplyr::mutate(N.per.mm2.scaled = N.per.mm2 / funAUC(WinMean, N.per.mm2))
 
-stopifnot(!(Inf %in% AUCScaledSlides_300$N.per.mm2.scaled))
+print(paste('contains Inf values do to small number of cells:', (Inf %in% AUCScaledSlides_300$N.per.mm2.scaled)))
 
 # Sometimes there are Infinite values here in case of small number of cells
 # Remove these samples
@@ -207,6 +217,6 @@ stopifnot(length(unique(lapply(unique(AUCcheck$AUC), round)))==1)
 
 #save this
 write_delim(AUCScaledSlides_300 %>% 
-              mutate(phenotype_combo=paste(phenotype_from,phenotype_to,sep='_to_')), paste(here('scratch/AUCScaledSlides_300_VascularStroma'), '.tsv', sep=''),delim='\t')
+              mutate(phenotype_combo=paste(phenotype_from,phenotype_to,sep='_to_')), paste(here('scratch/AUCScaledSlides_300_'),gsub(' ', '_', structure_type, fixed=T) ,'.tsv', sep=''),delim='\t')
 
 toc()

@@ -9,7 +9,11 @@ library(ComplexHeatmap)
 library(spatstat)
 library(dbscan)
 
-structure_type <- 'Vascular stroma'
+# structure_type <- 'Vascular stroma'
+# structure_type <- 'Suppressed expansion'
+# structure_type <- 'APC enriched'
+# structure_type <- 'Granulocyte enriched'
+structure_type <- "TLSlike"
 
 clinical_data <- getClinical()
 cells <- getCellsAlternative()
@@ -32,6 +36,10 @@ VS_imageN <- VS %>% filter(n > 5) %>% pull(ImageNumber)
 VS_images <- cellsWithStructure %>% filter(ImageNumber %in% VS_imageN)
 VS_images <- VS_images %>% mutate(label =ifelse(label == structure_type, structure_type, 'other'))
 VS_images$label[is.na(VS_images$label)] <- "other"
+
+print(structure_type)
+
+print(paste('number of images:', length(VS_imageN)))
 
 # function to assign Tumor/Stroma using KDEtumor, KDEstrom, and input coordinates
 structure_or_other <- function(kde_structure, kde_other, location){
@@ -65,8 +73,8 @@ sigmas_ppl$sample <- as.character(sigmas_ppl$sample)
 sigmas_ppl$sigma <- as.numeric(sigmas_ppl$sigma)
 sigmas_ppl$structure_other <- as.character(sigmas_ppl$structure_other)
 
-samples <- unique(VS_images %>% pull(sample))[1:10]
-print(length(samples))
+samples <- unique(VS_images %>% pull(sample))
+print(paste('Executing script for:',length(samples),'samples'))
 
 for (i in samples){
   test <- VS_images %>% filter(sample == i) %>% dplyr::select(Location_Center_X, Location_Center_Y) %>% as.matrix
@@ -100,12 +108,13 @@ for (i in samples){
   # Compute optimal sigma tumor
   optimal_sigma <- bw.ppl(spdat_structure)
   sigmas_ppl <- bind_rows(sigmas_ppl, 
-                          data.frame(sample=i, sigma=as.numeric(optimal_sigma), structure_other='S'))
+                          data.frame(sample=i, sigma=(as.numeric(optimal_sigma)+(4*as.numeric(optimal_sigma))), structure_other='S'))
+  print((as.numeric(optimal_sigma)+(4*as.numeric(optimal_sigma))))
   
   # Compute optimal sigma stroma
   optimal_sigma <- bw.ppl(spdat_other)
   sigmas_ppl <- bind_rows(sigmas_ppl, 
-                          data.frame(sample=i, sigma=max(as.numeric(optimal_sigma),50), structure_other='O'))
+                          data.frame(sample=i, sigma=(as.numeric(optimal_sigma)), structure_other='O'))
   
   
   
@@ -119,28 +128,28 @@ for (i in samples){
   print(i)
   test <- VS_images %>% filter(sample == i) %>% dplyr::select(Location_Center_X, Location_Center_Y) %>% as.matrix
   ## Compute point pattern for tumor cells
-  x <- VS_images %>% filter(sample == i) %>% filter(label == structure_type)
+  img <- VS_images %>% filter(sample == i) %>% filter(label == structure_type)
   spdat_structure <- ppp(
-    x = x$Location_Center_X,
-    y = x$Location_Center_Y,
+    x = img$Location_Center_X,
+    y = img$Location_Center_Y,
     window = owin(
       xrange = c(min(test[,1]), max(test[,1])),
       yrange = c(min(test[,2]), max(test[,2]))
     ),
-    marks = x$label
+    marks = img$label
   )
   # Window(spdat_structure) <- ripras(spdat_structure)
   
   ## Compute point pattern for stromal cells
-  x <- VS_images %>% filter(sample == i) %>% filter(label != structure_type)
+  img <- VS_images %>% filter(sample == i) %>% filter(label != structure_type)
   spdat_other <- ppp(
-    x = x$Location_Center_X,
-    y = x$Location_Center_Y,
+    x = img$Location_Center_X,
+    y = img$Location_Center_Y,
     window = owin(
       xrange = c(min(test[,1]), max(test[,1])),
       yrange = c(min(test[,2]), max(test[,2]))
     ),
-    marks = x$label
+    marks = img$label
   )
   
   # Window(spdat_other) <- ripras(spdat_other)
@@ -177,6 +186,6 @@ for(i in samples){
   )
 }
 
-saveRDS(data_with_assigned_locations, here('scratch/dataWithSplittedRegions3.rds'))
+saveRDS(data_with_assigned_locations, paste(here('scratch/Regions_'),gsub(' ','_',structure_type,fixed=T), '.rds', sep=''))
 
 message('done!')

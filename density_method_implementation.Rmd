@@ -24,13 +24,40 @@ library(dplyr)
 #  Choose original or alternative classification
 # cells <- getCells()
 # cells <- getCellsAlternative()
-cells <- readRDS(here('DATA/splittedCells_vascularStroma.rds')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
+
+# structure_type <- 'Vascular_stroma_run2'
+# structure_type <- 'Suppressed_expansion'
+# structure_type <- 'APC_enriched'
+# structure_type <- 'Granulocyte_enriched'
+structure_type <- "TLSlike"
+
+cells <- readRDS(paste(here('DATA/splittedCells_'),structure_type,'.rds',sep='')) %>% dplyr::select(-c(ImageNumber)) %>% dplyr::rename(ImageNumber = Split_ImageNumber)
+
 cells <- as.data.table(cells)
 
-# cells <- cells %>% mutate(is_epithelial = ifelse(meta_description == "Ki67+_cells", FALSE, is_epithelial))
 ```
 
-## Cell type densities
+## cell type Densities
+```{r}
+densities <- merge(getCellCounts(cells),cells %>% group_by(ImageNumber) %>% summarise(max = max(Location_Center_X)), by.x='tnumber', by.y='ImageNumber')
+densities <- merge(densities,cells %>% group_by(ImageNumber) %>% summarise(max = max(Location_Center_Y)), by.x='tnumber', by.y='ImageNumber')
+densities <- densities %>% mutate(area = (max.x*max.y)/1000)
+densities <- densities %>% mutate(density = n/area)
+saveRDS(densities, here('scratch/features/cell_densitiesAlternative.rds'))
+```
+
+
+```{r}
+cells <- getCells()
+densities <- merge(getCellCounts(cells),cells %>% group_by(ImageNumber) %>% summarise(max = max(Location_Center_X)), by.x='tnumber', by.y='ImageNumber')
+densities <- merge(densities,cells %>% group_by(ImageNumber) %>% summarise(max = max(Location_Center_Y)), by.x='tnumber', by.y='ImageNumber')
+densities <- densities %>% mutate(area = (max.x*max.y)/1000)
+densities <- densities %>% mutate(density = n/area)
+saveRDS(densities, here('scratch/features/cell_densities.rds'))
+```
+
+
+## Cell type fractions
 Generate absolute count matrix for each image.
 
 ```{r}
@@ -139,7 +166,7 @@ cellPhenotypes <- dcast(cellPhenotypes, ImageNumber ~ meta_description, value.va
 istumour_labels <- (unique(cells %>% dplyr::select(ImageNumber, isTumour)))
 cellPhenotypes <- merge(cellPhenotypes,istumour_labels, by='ImageNumber')
 
-saveRDS(cellPhenotypes, file=here('scratch/features/regions/cell_proportions_per_imageVS.rds'))
+saveRDS(cellPhenotypes, file=paste(here('scratch/features/regions/cell_proportions_per_image_'),structure_type,'.rds',sep=''))
 
 ```
 
