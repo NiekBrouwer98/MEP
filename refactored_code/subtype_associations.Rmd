@@ -1,0 +1,993 @@
+---
+title: "Feature associations"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+library(data.table)
+library(multcomp)
+library(ggrepel)
+library(ggpubr)
+library(rstatix)
+library(rlang)
+library(patchwork)
+library(cowplot)
+
+
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here("figure_styling.R"))
+source(here('logisticRegression_methods.R'))
+
+outdir <- here('output/final_figures/subtypeAssociations/')
+cells <- getCellsAlternative()
+structures <- getStructures()
+TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
+ptLevelTMEinteractions <- read_fst(here('scratch/ptLeveLTMEInteractions.fst'), as.data.table=T)
+NetworkProperties <- readRDS(here('scratch/NetworkProperties.rds'))
+clinical_data <- getClinical()
+init_predictors <- predictorInitialFile()
+```
+
+```{r}
+TMEStructurePredictors <- c("TMEStructure1", "TMEStructure2", "TMEStructure3", "TMEStructure4", "TMEStructure5", "TMEStructure6", "TMEStructure7", "TMEStructure8", "TMEStructure9", "TMEStructure10")
+cPh_tumour <- c("CKmed_ERorHER2-_cells", "CK+_ER+_cells" , "CK+_ER-_cells","CK-_cells","CK-MHC+_cells","Ki67+_cells_epithelial", "HER2+_cells","Basal")
+cPh_tme <- setdiff(unique(cells$meta_description), cPh_tumour)
+cPh_tme_original <- c("Bcells_originalType","CD38+lymphocytes_originalType","CD4+Tcells_originalType","CD4+TcellsAPCs_originalType","CD57+_originalType","CD8+Tcells_originalType","Endothelial_originalType","Fibroblasts_originalType","FibroblastsFSP1+_originalType","Granulocytes_originalType","Ki67+_originalType","Macrophages_originalType","Macrophagesgranulocytes_originalType","Myofibroblasts_originalType","MyofibroblastsPDPN+_originalType","TRegTEx_originalType" )
+cPh_tumour_original <- c("Basal_originalType","CD15+_originalType","CK8-18+ERhi_originalType","CK8-18hiCXCL12hi_originalType","CK8-18hiERlo_originalType","CK+CXCL12+_originalType","CKloERlo_originalType","CKloERmed_originalType","CKmedERlo_originalType","ERhiCXCL12+_originalType","EpCD57+_originalType","EpKi67+_originalType","HER2+_originalType","MHCIIIhi_originalType","MHCIhiCD57+_originalType","MHChiCD15+_originalType")
+  
+```
+
+
+## Feature importance
+
+```{r}
+response_types <- c(c('Basal','Luminal A', 'Luminal B', 'HER2', 'Normal-like'),c("ERplusHER2-", "ER-HER2-", "ERplusHER2plus", "ER-HER2plus"))
+prediction_types <- c('combination', 'shape_and_scale', 'shape', 'scale', 'TME_proportion', 'tumour_proportion')
+
+toModel <- apply_filtering(init_predictors, 100)
+toModel <- split(toModel, by = 'isTestCohort')
+sds <- apply(toModel$train, 2, sd)
+stdDF <- tibble(var = colnames(toModel$train), std = sds)
+
+coefList_all <- data.frame(matrix(nrow = 0, ncol = 4))
+for (t in response_types){
+  file <- paste('coefList_', t,sep='')
+  for (p in prediction_types){
+      path <- paste(file, '_', p, sep ='')
+      # Read coefficient lists saved during predictions
+      files <- grep(path,list.files(path = here('scratch/coeflists_run3/')),fixed=T,value=T)
+      for (f in files){
+      coefList <- readRDS(paste(here('scratch/coeflists_run3/'),f,sep=''))
+      coefList <- coefList %>% mutate(var = gsub('_CPh', '',var, fixed=T))
+      coefList <- merge(coefList, stdDF, by='var', all.x=T)
+      coefList <- coefList %>% mutate(std_val = val * std) %>% dplyr::select(-c('val', 'std'))
+      coefList_all <- rbind(coefList_all, coefList)
+      }
+  }
+}
+
+for (t in response_types){
+  file <- paste('coefList_', t,sep='')
+  for (p in c('originalTME_proportion', 'originalTumour_proportion')){
+      path <- paste(file, '_', p, sep ='')
+      # Read coefficient lists saved during predictions
+      files <- grep(path,list.files(path = here('scratch/coeflists_run2/')),fixed=T,value=T)
+      for (f in files){
+      coefList <- readRDS(paste(here('scratch/coeflists_run2/'),f,sep=''))
+      coefList <- coefList %>% mutate(var = gsub('_CPh', '',var, fixed=T))
+      coefList <- merge(coefList, stdDF, by='var', all.x=T)
+      coefList <- coefList %>% mutate(std_val = val * std) %>% dplyr::select(-c('val', 'std'))
+      coefList_all <- rbind(coefList_all, coefList)
+      }
+  }
+}
+
+coefList_all <- na.omit(coefList_all)
+coefList_all <- coefList_all %>% group_by(response, predictor, var) %>% summarise(mean_coef = mean(std_val))
+coefList_all <- coefList_all %>% mutate(dir = ifelse(mean_coef < 0, 'neg', 'pos'))
+response_types <- c(c('Basal','Luminal A', 'Luminal B', 'HER2', 'Normal-like'))
+
+coefList_all <- coefList_all %>% mutate(var = gsub('_CPh', '', var, fixed=T))
+coefList_all <- coefList_all %>% mutate(var = gsub('ERorHER2-', '', var, fixed=T))
+
+coefList_all <- coefList_all %>% filter(response %in% response_types)
+
+saveRDS(coefList_all, here('scratch/multivariateFeatureImportance.rds'))
+```
+
+# All feature coefficients per subtype
+
+
+```{r}
+coefList_all <- readRDS(here('scratch/multivariateFeatureImportance.rds'))
+
+coefList_all_withoutCombi <- coefList_all %>% filter(predictor != 'combination') %>% filter(predictor != 'shape_and_scale') 
+coefList_all_withCombi <- coefList_all %>% filter(predictor == 'combination')
+
+
+ylabels <- function(coefList){
+  all <- c(cPh_tumour,'Basal_cells', cPh_tme, cPh_tumour_original, cPh_tme_original,sort(unlist(grep('shape', colnames(apply_filtering(init_predictors, 100)), value=T))),sort(unlist(grep('scale', colnames(apply_filtering(init_predictors, 100)), value=T))))
+  selection <- intersect(all, coefList$var)
+  
+  return(selection)
+}
+
+# plot_coefficients <- function(coefList){
+#   ggplot(coefList, aes(response,var))  + 
+#   geom_tile(aes(fill = mean_coef))  + 
+#   geom_text(aes(label = (round(as.numeric(mean_coef),2))),size=3)  +
+#   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+#   panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10)) +
+#   # theme(axis.text.y = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+#   # scale_fill_manual(values= c('grey','red', 'green'), na.value = 'grey') +
+#   scale_fill_gradientn(colours=c("red",'white', "green"),limits = c(min(coefList$mean_coef),max(coefList$mean_coef)),values = c(0,abs(min(coefList$mean_coef))/(abs(min(coefList$mean_coef))+abs(max(coefList$mean_coef))) ,1),name='coefficient') + ylim(ylabels(coefList)) + xlim(response_types) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#   
+# }
+# 
+# p <- plot_coefficients(coefList_all_withoutCombi)
+# ggsave(paste(outdir,'overview_run2.pdf',sep=''),height=20, width=10)
+# 
+# p <- plot_coefficients(coefList_all_withCombi)
+# ggsave(paste(outdir,'overview_combination_run2.pdf',sep=''),height=14, width=12)
+# 
+# 
+# coefList_all_withCombi <- coefList_all %>% filter(predictor == 'shape_and_scale')
+# ggsave(paste(outdir,'overview_shapeAndScale_run2.pdf',sep=''),height=14,width=12)
+```
+
+```{r}
+forestPlot <- function(df){
+  df <- df %>% mutate(var = gsub('_', ' ', var))
+  df <- df %>% mutate(var = gsub(' originalType', '', var))
+  # df_copy <- df  %>% u%>% mutate(row_number= 1:n()) %>% mutate(col = factor(ifelse(row_number %% 2 == 0, 1, 0)))
+  print(df)
+
+  f <- ggplot() +
+  geom_col(data=df,aes(y = var, x = mean_coef, fill=dir)) + 
+  # geom_rect(data=df_copy,aes(xmin = -0.2,xmax = 0.2,ymin= row_number -0.5, ymax=row_number+0.5, fill=col),alpha=0.4) +
+  scale_fill_manual(breaks = c('pos','neg',1,0), values = c("#117733","#CC6677","white", "grey50" ) ) +
+  guides(fill = FALSE) +
+  theme_bw() + 
+    theme(panel.grid.minor.x = element_blank(),
+      panel.grid.minor.y = element_line(size = 0.5,linetype = 2),
+      panel.grid.major.y = element_line(size = 2.5,linetype = 1),plot.title = element_text(hjust=0.4)) + ylab('') + xlab('') + facet_grid(~ response) +
+  theme(legend.position="none")
+  return(f)
+}
+
+predictor_types <- unique(coefList_all$predictor)
+
+p1 <- forestPlot(coefList_all_withoutCombi %>% filter(predictor == 'tumour_proportion'))
+p2 <-  forestPlot(coefList_all_withoutCombi %>% filter(predictor == 'TME_proportion'))
+
+p3 <- forestPlot(coefList_all_withoutCombi %>% filter(predictor == 'originalTumour_proportion'))
+p4 <-  forestPlot(coefList_all_withoutCombi %>% filter(predictor == 'originalTME_proportion'))
+
+p_total <- (p1 + p3) / (p2 + p4)  + plot_annotation(tag_level='A')
+
+# ggsave(paste(outdir,'LRcoefficientsFractions.pdf',sep=''),height=8,width=18)
+
+p1 <- forestPlot(rbind(coefList_all_withoutCombi %>% filter(predictor == 'shape' | predictor == 'scale' ) %>% group_by(response) %>% slice_max(order_by = abs(mean_coef), n=10)))
+
+ggsave(paste(outdir,'LRcoefficientsSpatial.pdf',sep=''),height=7,width=14)
+
+p1 <- forestPlot(rbind(coefList_all %>% filter(predictor =='combination') %>% group_by(response) %>% slice_max(order_by = abs(mean_coef), n=10)))
+
+ggsave(paste(outdir,'LRcoefficientsCombi.pdf',sep=''),height=7,width=14)
+
+```
+
+
+
+Do the considered features contain common cell types. 
+
+```{r}
+subset <- coefList_all_withoutCombi  %>% filter(predictor == 'shape' |predictor == 'scale')  %>% ungroup(predictor) %>% select(-c(predictor))
+subset <- subset %>% separate(var, c('phenotype_from', 'phenotype_to'), sep = '_to_')  %>% mutate(phenotype_from = gsub('scale_', '', phenotype_from, fixed=T)) %>% mutate(phenotype_from = gsub('shape_', '', phenotype_from, fixed=T))
+phenotype_from <- subset %>% group_by(response, phenotype_from) %>% summarise(n = n()) %>% mutate(type = 'phenotype_from')
+phenotype_to <- subset  %>% group_by(response, phenotype_to)  %>% count(phenotype_to) %>% mutate(type = 'phenotype_to')
+coef_count <- rbind(phenotype_from, phenotype_to)
+
+ggplot(coef_count %>% filter(type == 'phenotype_from'), aes(response, phenotype_from)) + geom_tile(aes(fill = n))  + geom_text(aes(label = n),size=5,color='white') + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10))  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(response_types) + ylim(c(c(unlist(gsub('_CPh', '', cPh_tumour, fixed=T)), unlist(gsub('_CPh', '', cPh_tme, fixed=T)))))
+
+ggsave(here('output//Method_comparison/feature_importance/overview_run2_FROMcounts.pdf'),height=7,width=10)
+
+ggplot(coef_count %>% filter(type == 'phenotype_to'), aes(response, phenotype_to)) + geom_tile(aes(fill = n))  + geom_text(aes(label = n),size=5,color='white') + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black"), axis.text.x = element_text(size = 10))  + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + xlim(response_types) + ylim(c(c(unlist(gsub('_CPh', '', cPh_tumour, fixed=T)), unlist(gsub('_CPh', '', cPh_tme, fixed=T)))))
+
+ggsave(here('output//Method_comparison/feature_importance/overview_run2_TOcounts.pdf'),height=7,width=10)
+
+
+```
+
+## Univariate evaluation
+Analyse the individual effect of features.
+
+```{r}
+original_density_features <- getCellProportionsPerImage() %>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(original_density_features) <- gsub("_CPh", "", colnames(original_density_features))
+colnames(original_density_features) <- gsub("[^A-Za-z0-9+\\-]", "", colnames(original_density_features))
+colnames(original_density_features) <- paste0(colnames(original_density_features), '_originalType')
+
+density_features <- getCellProportionsPerImageAlternative()%>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+
+generate_matrix_zeroOneScaling <- function(df, col_rownames ,subselection=NULL, NA_percentage=0, scale_rows=FALSE){
+  m <- as.data.frame(df)
+  rownames(m) <- m[,col_rownames]
+  m <- subset(m,select = -c(get(col_rownames)))
+  
+  # Filtering
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+
+  m <- replace(m,is.na(m),0)
+  m <- as.data.frame(m)
+  
+  
+  # Scaling
+  m <- apply(m, 2, function(x) (x - min(x)) / (max(x) - min(x)))
+  
+  
+  return(m)
+}
+
+shape_features <- generate_matrix_zeroOneScaling(shape_features,'tnumber') + 0.001
+scale_features <- generate_matrix_zeroOneScaling(scale_features,'tnumber') + 0.001
+density_features <- generate_matrix_zeroOneScaling(density_features, 'ImageNumber') + 0.001
+original_density_features <- generate_matrix_zeroOneScaling(original_density_features, 'ImageNumber_originalType') + 0.001
+```
+
+```{r}
+computePvalues <- function(featureSet, r){
+  print(r)
+  subset <- merge(featureSet, clinical_data %>% dplyr::select(c(ImageNumber, ER_HER2_status, PAM50)), by.x='row.names', by.y='ImageNumber') %>% dplyr::select(-dplyr::any_of(c('Row.names', 'ImageNumber')))
+  subset <- subset %>% mutate(group = ifelse(PAM50 == r, r, paste('no', r)))
+
+  subset <- subset %>% dplyr::select(-c(ER_HER2_status, PAM50))
+  response <- subset$group
+  
+
+  # Create an empty vector to store the adjusted p-values and log2 fold changes
+  p_values <- rep(NA, ncol(subset)-1)
+  log2_fold_changes <- rep(NA, ncol(subset)-1)
+
+  # Perform univariate feature importance analysis for each feature
+  for (i in 1:(ncol(subset)-1)) {
+    
+    # feature_subset <- subset
+    feature_subset <- subset %>% filter(!(subset[, i] == 0.001 ))
+
+    feature <- feature_subset[, i]
+
+    response <- feature_subset$group
+    
+    computePvalue <- function(feature, response) {
+    p_value <- tryCatch(
+        { p <- t.test(feature ~ response)$p.value
+        return(p)
+        
+        
+        },
+        error=function(cond) {
+            message(colnames(featureSet)[[i]])
+            return(1)
+        })
+        return(p_value)
+    }
+    
+    p_value <- computePvalue(feature, response)
+
+    mean_response <- tapply(feature, response, mean)
+
+    log2_fold_change <- log2((mean_response[r]) / mean_response[paste('no', r)])
+    mean_a <- (mean_response[r])
+    mean_b <- mean_response[paste('no', r)]
+
+    # Store the p-value and log2 fold change in their respective vectors
+    p_values[i] <- p_value
+    log2_fold_changes[i] <- log2_fold_change
+  }
+
+  # Apply p-value adjustment method (e.g., Bonferroni, Benjamini-Hochberg)
+  adjusted_p_values <- p.adjust(p_values, method = "BH")
+
+  # Create a data frame with the features, p-values, log2 fold changes, and adjusted p-values
+  result <- data.frame(Feature = colnames(subset %>% dplyr::select(-c(group))),
+                       p_value = p_values,
+                       log2FoldChange = log2_fold_changes,
+                       Adjusted_p_value = adjusted_p_values) %>%
+            mutate(Sig = ifelse(Adjusted_p_value < 0.05, T, F),
+                   mean_response = mean_a,
+                   mean_noresponse = mean_b)
+
+  return(result)
+}
+
+
+
+univariateFeatureImportance <- data.frame(matrix(nrow=0, ncol=9))
+for (s in setdiff(unique(clinical_data$PAM50),NA)){
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(original_density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'original_densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(density_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'densities'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(shape_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'shape'))
+  univariateFeatureImportance <- rbind(univariateFeatureImportance, computePvalues(scale_features, s) %>% mutate(response = s) %>% mutate(featureSet = 'scale'))
+
+}
+
+univariateFeatureImportance <- univariateFeatureImportance %>% mutate(minlogP = -log(Adjusted_p_value, base = 10))
+
+saveRDS(univariateFeatureImportance, here('scratch/univariateFeatureImportance.rds'))
+```
+
+
+## Volcano plots
+
+```{r}
+univariateFeatureImportance <- readRDS(here('scratch/univariateFeatureImportance.rds'))
+
+# Creating the volcano plot
+fold_threshold = 1
+p_value = -log10(0.05)
+univariateFeatureImportance <- univariateFeatureImportance %>% mutate(Sig = ifelse((minlogP > -log10(0.05)), T, F))
+univariateFeatureImportance$Feature <- gsub('_CPh', '', univariateFeatureImportance$Feature)
+
+print(univariateFeatureImportance %>% filter(Sig == T) %>% filter(featureSet == 'densities'))
+print(univariateFeatureImportance %>% filter(Sig == T) %>% filter(featureSet == 'shape' | featureSet == 'scale'))
+
+univariateFeatureImportanceEpithelial <- univariateFeatureImportance %>% filter(Feature %in% c(cPh_tumour, cPh_tumour_original)) %>% mutate(featureSet = ifelse(featureSet == 'original_densities', 'Danenberg cell type', 'Alternative cell type'))
+
+top_values <- univariateFeatureImportanceEpithelial %>% filter(Sig ==T) %>% group_by(response,featureSet) %>% slice_max(order_by = minlogP, n = 3) %>% distinct()
+top_values_min <- top_values %>% filter(log2FoldChange < 0)
+top_values_max <- top_values %>% filter(log2FoldChange > 0)
+
+ggplot() +
+    geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+  geom_point(data = (univariateFeatureImportanceEpithelial %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response,shape=featureSet),alpha=0.8,size=3) +  
+  geom_point(data = (univariateFeatureImportanceEpithelial %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP,shape=featureSet),color='grey',alpha=0.8) +
+    geom_label_repel(data= top_values_min, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType','',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',force=100,xlim=c(NA,-2.8),ylim=c(2,NA)) +
+      geom_label_repel(data= top_values_max, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType','',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',force=100,xlim=c(2.4,NA),ylim=c(2,NA)) +  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value") + xlim(-5,5) +
+  # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+        geom_hline(yintercept=-log10(0.05), col="black") +
+  theme_bw() + scale_color_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) + scale_fill_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) +
+  labs(shape=NULL)
+
+ggsave(paste(outdir, 'volcanoplotProportionsEpithelial.pdf',sep=''),width=12,height=7)
+
+
+univariateFeatureImportanceTME <- univariateFeatureImportance %>% filter(Feature %in% c(cPh_tme, cPh_tme_original)) %>% mutate(featureSet = ifelse(featureSet == 'original_densities', 'Danenberg cell type', 'Alternative cell type'))
+
+top_values <- univariateFeatureImportanceTME %>% filter(Sig ==T) %>% group_by(response,featureSet) %>% slice_max(order_by = minlogP, n = 3) %>% distinct()
+top_values_min <- top_values %>% filter(log2FoldChange < 0)
+top_values_max <- top_values %>% filter(log2FoldChange > 0)
+
+
+ggplot() +
+    geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+    geom_hline(yintercept=-log10(0.05), col="black") +
+  geom_point(data = (univariateFeatureImportanceTME %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response,shape=featureSet),alpha=0.8,size=3) +  
+  geom_point(data = (univariateFeatureImportanceTME %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP,shape=featureSet),color='grey',alpha=0.8) +
+    geom_label_repel(data= top_values_min, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType','',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',force=150,xlim=c(NA,-2.8),ylim=c(2,NA)) +
+      geom_label_repel(data= top_values_max, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType','',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',force=500,xlim=c(2.4,NA),ylim=c(2,NA)) +
+  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value") + xlim(-5,5) +
+  # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+  theme_bw() + scale_color_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) + scale_fill_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) +
+  labs(shape=NULL)
+
+ggsave(paste(outdir, 'volcanoplotProportionsTME.pdf',sep=''),width=12,height=7)
+
+
+
+univariateFeatureImportanceProportions <- univariateFeatureImportance %>% mutate(`feature set` = ifelse(featureSet %in% c('shape', 'scale'), 'spatial feature', ifelse(featureSet == 'original_densities', 'fraction \n Danenenberg classification', 'fraction \n alternative classification'))) %>% filter(featureSet == 'original_densities')
+
+univariateFeatureImportanceProportionsAlternative <- univariateFeatureImportance %>% mutate(`feature set` = ifelse(featureSet %in% c('shape', 'scale'), 'spatial feature', ifelse(featureSet == 'original_densities', 'fraction \n Danenenberg classification', 'fraction \n alternative classification'))) %>% filter(featureSet == 'densities')
+
+univariateFeatureImportanceSpatial <- univariateFeatureImportance %>% mutate(`feature set` = ifelse(featureSet %in% c('shape', 'scale'), 'spatial feature', ifelse(featureSet == 'original_densities', 'fraction \n Danenenberg classification', 'fraction \n alternative classification'))) %>% filter((`feature set` == 'spatial feature'))
+
+univariateFeatureImportanceProportionsAlternative <- univariateFeatureImportanceProportionsAlternative %>% mutate(Feature = gsub('_',' ',Feature)) %>% mutate(cell_type = ifelse(Feature %in% gsub('_',' ',cPh_tme), 'TME', 'epithelial'))
+
+univariateFeatureImportanceProportions <- univariateFeatureImportanceProportions %>% mutate(Feature = Feature) %>% mutate(cell_type = ifelse(Feature %in% cPh_tme_original, 'TME', 'epithelial'))
+
+# top_values <- univariateFeatureImportanceProportions %>% filter(Sig ==T) %>% group_by(response) %>% slice_max(order_by = minlogP, n = 3) %>% distinct()
+# 
+# ggplot() +
+#     geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+#   geom_point(data = (univariateFeatureImportanceProportions %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response,shape=cell_type),alpha=0.8,size=3) +  
+#   geom_point(data = (univariateFeatureImportanceProportions %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP,shape=cell_type),color='grey',alpha=0.8) +
+#   # geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_originalType','',Feature)), color='black',size =2,nudge_x = 1, nudge_y=1) +
+#     geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType',' ',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',force=100,ylim=c(7.5,NA)) +
+#   labs(x = "Log2 Fold Change",
+#        y = "-log10 Adjusted P-value") + xlim(-5,5) +
+#   # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+#         geom_hline(yintercept=-log10(0.05), col="black") +
+#   theme_bw() + scale_color_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) + scale_fill_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) +
+#   labs(shape=NULL)
+# 
+# ggsave(paste(outdir, 'volcanoplotProportions.pdf',sep=''),width=10,height=6)
+# 
+# top_values <- univariateFeatureImportanceProportionsAlternative %>% filter(Sig ==T) %>% group_by(response) %>% slice_max(order_by = minlogP, n = 3) %>% distinct()
+# 
+# ggplot() +
+#     geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+#   geom_point(data = (univariateFeatureImportanceProportionsAlternative %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response,shape=cell_type),alpha=0.8,size=3) +  geom_point(data = (univariateFeatureImportanceProportionsAlternative %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP,shape=cell_type),color='grey',alpha=0.8) +
+#   # geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_originalType','',Feature)), color='black',size =2,nudge_x = 1, nudge_y=1) +
+#     geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType',' ',Feature)),fill=response), color='white',size =4,min.segment.length = 0, segment.color = 'black',ylim = c(8, NA),force=500) +
+#   labs(x = "Log2 Fold Change",
+#        y = "-log10 Adjusted P-value") + xlim(-5,5) +
+#   # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+#         geom_hline(yintercept=-log10(0.05), col="black") +
+#   theme_bw() + scale_color_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) + scale_fill_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5])  +
+#   labs(shape=NULL)
+#  
+# ggsave(paste(outdir, 'volcanoplotProportionsAlternative.pdf',sep=''),width=10,height=6)
+
+
+top_values <- univariateFeatureImportanceSpatial %>% filter(Sig ==T) %>% group_by(response) %>% slice_max(order_by = minlogP, n = 3) %>% distinct()
+
+ggplot() +
+    geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+  geom_point(data = (univariateFeatureImportanceSpatial %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP, colour=response),alpha=0.8) +  geom_point(data = (univariateFeatureImportanceSpatial %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP),color='grey',alpha=0.8) +
+  # geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_originalType','',Feature)), color='black',size =2,nudge_x = 1, nudge_y=1) +
+    geom_label_repel(data= top_values, aes(x=log2FoldChange, y=minlogP, label=gsub('_',' ',gsub('_originalType',' ',Feature)),fill=response), color='white',size =4, segment.color = 'black',force=1000,ylim=c(3,NA)) +
+  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value") + xlim(-5,5) + ylim(0,8) +
+  # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+        geom_hline(yintercept=-log10(0.05), col="black") +
+  theme_bw() + scale_color_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5]) + scale_fill_manual(name = 'PAM50',values = getDiscreteColors(6)[1:5])
+
+ggsave(paste(outdir, 'volcanoplotSpatial.pdf',sep=''),width=12,height=8)
+
+
+```
+
+## Example plots
+Show plots of important features.
+
+```{r}
+densities <- getCellProportionsPerImageAlternative() %>% filter(isTumour == T)
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% (densities %>% pull('ImageNumber')))
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% (densities %>% pull('ImageNumber')))
+
+retrieveDistanceData <- function(parameter_df){
+  distance_data <- read_tsv(here('scratch/AUCScaledSlides_300_run2.tsv')) %>% as_tibble %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(phenotype_combo = paste(phenotype_from, phenotype_to, sep='_to_')) %>%
+  dplyr::select(tnumber, phenotype_combo, `N.per.mm2.scaled`, distance_window) %>%
+  mutate(new = `N.per.mm2.scaled` * 1000) %>%
+  mutate(new =round(new))
+  
+  estimated_distances <- distance_data  %>% unite('unique_sample', c(tnumber, phenotype_combo), remove=F) %>% filter(unique_sample %in% parameter_df$unique_sample)
+  
+  return(estimated_distances)
+  
+}
+
+
+computeMedians <- function(distance_data){
+    total_observations <- distance_data %>% group_by(unique_sample) %>%
+  summarise(total_observations= c_across(cols = c(N.per.mm2.scaled)) %>% sum())
+
+  medians <- merge(distance_data, total_observations, by='unique_sample', all.x=T)
+  medians <- medians %>% mutate(frequency = round((N.per.mm2.scaled / total_observations)*10000))
+  medians <- medians %>% group_by(unique_sample) %>% summarise(
+    median_observations = median(rep(distance_window,frequency))
+    )
+  return(medians)
+}
+
+allParametersAlternative <- getALLParametersAlternative()
+
+distance_data <- retrieveDistanceData(allParametersAlternative)
+medians <- computeMedians(distance_data)
+```
+
+```{r}
+names(densities) <- gsub('_CPh','',gsub('+', 'plus', names(densities), fixed = T))
+names(densities) <- gsub('_CPh','',gsub('-', 'min', names(densities), fixed = T))
+colors <- tibble(name = c('Basal', 'HER2', 'Luminal A', 'Luminal B', 'Normal-like'), color = getDiscreteColors(6)[1:5])
+
+DensityPlot <- function(df, response, feature){
+  d <- merge(df,clinical_data,by.x='ImageNumber', by.y='ImageNumber')
+  
+  d <- d %>% mutate(response_label = ifelse(PAM50 == response, response, 'other' ))
+  
+  d <- na.omit(d)
+  d$response_label <- factor(d$response_label, levels = c( response, 'other'))
+  
+  p_valueList <- univariateFeatureImportance %>% mutate(edited_Feature = gsub('_CPh','',gsub('+', 'plus', univariateFeatureImportance$Feature, fixed = T)))
+  p_valueList <- p_valueList %>% mutate(edited_Feature = gsub('-', 'min', edited_Feature, fixed = T))
+  p_valueList <- p_valueList %>% rename(response_label = response)
+  print(head(p_valueList))
+
+  p_value <- p_valueList %>% filter(edited_Feature == feature & response_label == response) %>% pull(Adjusted_p_value)
+  print(p_value)
+  
+  p <- ggboxplot(na.omit(d), x = 'response_label', y = feature, fill='response_label') + ylim(0,1) + ylab('cell type fraction') + xlab('') + ggtitle(gsub('plus', '+', gsub('min', '-', ggtitle(gsub('_', ' ',gsub('ERorHER2min','',feature))), fixed = T), fixed = T)) +
+  # + stat_compare_means(method = "t.test", label = "p.format", label.x.npc = 'center', label.y.npc = 'top',color='red')  
+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(breaks = c(response,'other' ), values=c(colors %>% filter(name == response) %>% pull(color), "white")) + theme(legend.position = "none",plot.title = element_text(size=10,hjust=0.5)) + annotate('text', x=1.5, y=1, label=paste('p =',signif(p_value,digits=3)),col='red')
+  return(p)
+}
+DensityPlot(densities,'HER2','CD4plus_cells_APCs')
+DensityPlot(densities,'Luminal B','CKmed_ERorHER2min_cells')
+```
+
+
+
+```{r}
+pam_types <- c("Basal","Luminal A","Luminal B","HER2","Normal-like")
+
+
+retrieveParameters <- function(df, response,feature){
+  d <- merge(df %>% filter(phenotype_combo == feature),clinical_data  %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)),by.x='tnumber', by.y='ImageNumber')
+  
+    d <- d %>% mutate(PAM50 = ifelse(is.na(PAM50), 'other', PAM50))
+  d <- d %>% mutate(group = ifelse(PAM50 == response, response, 'other' ))
+  
+  mean_d <- d %>% group_by(group) %>% summarise(mean_shape = mean(shape), mean_scale =mean(scale))
+  
+  print(mean_d)
+  
+  shape_group <- (mean_d %>% filter(group == response) %>% pull(mean_shape))[[1]]
+  scale_group <-  (mean_d %>% filter(group == response) %>% pull(mean_scale))[[1]]
+  shape_nogroup <- (mean_d %>% filter(group == 'other') %>% pull(mean_shape))[[1]]
+  scale_nogroup <- (mean_d %>% filter(group == 'other') %>% pull(mean_scale))[[1]]
+  
+  return(list('shape' = shape_group, 'scale' = scale_group, 'shape_alternative' = shape_nogroup, 'scale_alternative' = scale_nogroup))
+}
+
+
+create_boxplot <- function(df,medians, response,feature){
+  d <- merge(df %>% filter(phenotype_combo == feature),clinical_data  %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)),by.x='tnumber', by.y='ImageNumber')
+  d <- d %>% mutate(group = ifelse(PAM50 == response | ER_HER2_status == response, response, 'other' ))
+   
+  medians <- medians %>% filter(grepl(feature, unique_sample,fixed = T) ) %>% separate(unique_sample, into =c('tnumber', 'from', 'split', 'to'))
+  medians <- medians %>% mutate(group = ifelse(tnumber %in% (d %>% filter(group == response) %>% pull(tnumber)), response,'other' ))
+  
+  d$group <- factor(d$group, levels = c( response, 'other'))
+  medians$group <- factor(medians$group, levels = c( response, 'other'))
+  
+  
+  b1 <- ggboxplot(na.omit(d),x='group', y='shape',fill='group') + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(breaks = c(response,'other' ), values=c(colors %>% filter(name == response) %>% pull(color), "white")) + theme(legend.position = "none") + stat_compare_means(method = "t.test", label = "p.format", label.y.npc=0.9, label.x.npc = 'left',size=3,color='red') + plot_annotation(tag_level='A')
+  b2 <- ggboxplot(na.omit(d), x='group', y='scale',fill='group') + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ scale_fill_manual(breaks = c(response,'other' ), values=c(colors %>% filter(name == response) %>% pull(color), "white")) + theme(legend.position = "none")   + stat_compare_means(method = "t.test", label = "p.format", label.y.npc = 0.9, label.x.npc = 'left',size=3,color='red')  +plot_annotation(tag_level='A')
+
+  # + annotate('text', x=1.5, y=300, label=paste('p =',signif(0.0001712858,digits=3)),col='red',size=3) 
+  b3 <- ggboxplot(medians, x='group', y='median_observations',fill='group') + theme_bw() + ylab('median') + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(breaks = c(response,'other' ), values=c(colors %>% filter(name == response) %>% pull(color), "white")) + theme(legend.position = "none") + stat_compare_means(method = "t.test", label = "p.format", label.y.npc = 0.9, label.x.npc = 'left',size=3,color='red') + plot_annotation(tag_level='A')
+  return(b1+b2+b3)
+  
+}
+
+
+showDistanceCurvesPAM <- function(df,medians, response,other_types, feature){
+  g1 <- ggplot() + 
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,response,feature)$shape,scale = retrieveParameters(df,response,feature)$scale),aes(colour = response),n=600)  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[1]],feature)$shape,scale = retrieveParameters(df,other_types[[1]],feature)$scale),aes(colour=other_types[[1]]),n=600) +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[2]],feature)$shape,scale = retrieveParameters(df,other_types[[2]],feature)$scale),aes(colour=other_types[[2]]),n=600)  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[3]],feature)$shape,scale = retrieveParameters(df,other_types[[3]],feature)$scale),aes(colour=other_types[[3]]),n=600)  +
+    stat_function(fun = dweibull, args = list(shape = retrieveParameters(df,other_types[[4]],feature)$shape,scale = retrieveParameters(df,other_types[[4]],feature)$scale),aes(colour=other_types[[4]]),n=600)  +
+  xlim(0,600) + theme_bw() + xlab('1-NN distance (micron)') + ylab('normalized counts') + ggtitle(gsub('_', ' ',gsub('ERorHER2-','',feature))) + theme(plot.title = element_text(size=10,hjust=0.5)) + scale_color_manual(name='PAM50',breaks = colors %>% pull(name), values=colors %>% pull(color)) + theme(legend.position=c(.9,.23))
+    
+  b1 <- create_boxplot(df,medians, response,feature)
+  g_total <- g1 + inset_element(b1, 0.3, 0.5, 0.98, 0.98)
+  return(g_total)
+
+  
+}
+
+```
+```{r}
+selectSigFeatures <- function(subtype){
+  
+sig_fractions <- gsub('_CPh','',univariateFeatureImportanceProportionsAlternative %>% filter(response == subtype) %>% filter(Sig == T) %>% pull(Feature))
+
+sigspatial <- univariateFeatureImportanceSpatial %>% filter(response == subtype) %>% filter(Sig == T) %>% separate(Feature, into=c('phenotype_from', 'phenotype_to'), sep = '_to_') %>% mutate(fromfraction_sig = ifelse(phenotype_from %in%sig_fractions, T, F)) %>%  mutate(tofraction_sig = ifelse(phenotype_to %in%sig_fractions, T, F)) %>% distinct(phenotype_from, phenotype_to)
+
+  # return(sigspatial %>% filter(tofraction_sig == F & fromfraction_sig == F))
+  return(sigspatial)
+
+}
+
+for (s in pam_types){
+  print(s)
+  print(selectSigFeatures(s))
+
+}
+
+print(univariateFeatureImportanceSpatial %>% filter(Sig==T) %>% count(Feature) %>% arrange(desc(n)))
+
+```
+
+
+```{r}
+# Show examples for every subtype
+p1 <- DensityPlot(densities,'Basal','Myofibroblasts') + DensityPlot(densities,'Basal','Basal') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"Myofibroblasts_to_Basal"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureexample.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','Endothelial') + DensityPlot(densities,'Basal','Granulocytes_Macrophages') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,c('Basal')),'Endothelial_to_Granulocytes_Macrophages' )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureexample2.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','Granulocytes_Macrophages') + DensityPlot(densities,'Basal','Basal') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,c('Basal')),'Granulocytes_Macrophages_to_Basal' )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureexample3.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CKplus_ERmin_cells') + DensityPlot(densities,'Basal','Basal') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,c('Basal')),'CK+_ER-_cells_to_Basal' )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureexample3.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','Fibroblasts') + DensityPlot(densities,'Basal','Basal') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"Fibroblasts_to_Basal"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample4.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CKmed_ERorHER2min_cells') + DensityPlot(densities,'Basal','Basal') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"CKmed_ERorHER2-_cells_to_Basal"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample5.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CKmin_cells') + DensityPlot(densities,'Basal','CKplus_ERmin_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"CK-_cells_to_CK+_ER-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample6.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','Fibroblasts') + DensityPlot(densities,'Basal','Granulocytes_Macrophages') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"Fibroblasts_to_Granulocytes_Macrophages"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample7.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','HER2plus_cells') + DensityPlot(densities,'Basal','CKplus_ERmin_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"HER2+_cells_to_CK+_ER-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample8.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CD8plus_cells') + DensityPlot(densities,'Basal','CKplus_ERplus_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"CD8+_cells_to_CK+_ER+_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample9.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CKmin_cells') + DensityPlot(densities,'Basal','CKplus_ERmin_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"CK-_cells_to_CK+_ER-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample10.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','CKmed_ERorHER2min_cells') + DensityPlot(densities,'Basal','CKplus_ERmin_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"CKmed_ERorHER2-_cells_to_CK+_ER-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample11.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Basal','Granulocytes_Macrophages') + DensityPlot(densities,'Basal','Granulocytes_Macrophages') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Basal',setdiff(pam_types,'Basal'),"Granulocytes_Macrophages_to_Granulocytes_Macrophages"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'BasalFeatureExample12.pdf',sep=''),width=14,height=7)
+
+
+
+```
+
+```{r}
+p1 <- DensityPlot(densities,'HER2','Ki67plus_cells_epithelial') + DensityPlot(densities,'HER2','CKplus_ERmin_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"Ki67+_cells_epithelial_to_CK+_ER-_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'HER2','CKplus_ERmin_cells') + DensityPlot(densities,'HER2','HER2plus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"CK+_ER-_cells_to_HER2+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample2.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'HER2','CKplus_ERplus_cells') + DensityPlot(densities,'HER2','CD8plus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"CK+_ER+_cells_to_CD8+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample3.pdf',sep=''),width=14,height=7)
+
+
+p1 <- DensityPlot(densities,'HER2','CKplus_ERplus_cells') + DensityPlot(densities,'HER2','Myofibroblasts') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"CK+_ER+_cells_to_Myofibroblasts"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample4.pdf',sep=''),width=14,height=7)
+
+
+p1 <- DensityPlot(densities,'HER2','CKplus_ERmin_cells') + DensityPlot(densities,'HER2','CKplus_ERplus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"CK+_ER-_cells_to_CK+_ER+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample5.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'HER2','B cells') + DensityPlot(densities,'HER2','Endothelial') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'HER2',setdiff(pam_types,'HER2'),"B cells_to_Endothelial"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'HER2Featureexample6.pdf',sep=''),width=14,height=7)
+
+```
+```{r}
+p2 <- DensityPlot(densities,'Luminal A','Endothelial') + DensityPlot(densities,'Luminal A','Fibroblasts') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal A',setdiff(pam_types,'Luminal A'),"Endothelial_to_Fibroblasts"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalAFeatureexample.pdf',sep=''),width=14,height=7)
+
+p2 <- DensityPlot(densities,'Luminal A','Myofibroblasts') + DensityPlot(densities,'Luminal A','Granulocytes_Macrophages') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal A',setdiff(pam_types,'Luminal A'),"Myofibroblasts_to_Granulocytes_Macrophages"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalAFeatureexample2.pdf',sep=''),width=14,height=7)
+
+p2 <- DensityPlot(densities,'Luminal A','Myofibroblasts') + DensityPlot(densities,'Luminal A','CD4plus_cells_APCs') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal A',setdiff(pam_types,'Luminal A'),"Myofibroblasts_to_CD4+_cells_APCs"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalAFeatureexample3.pdf',sep=''),width=14,height=7)
+
+p2 <- DensityPlot(densities,'Luminal A','CD8plus_cells') + DensityPlot(densities,'Luminal A','Fibroblasts') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal A',setdiff(pam_types,'Luminal A'),"CD8+_cells_to_Fibroblasts"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalAFeatureexample4.pdf',sep=''),width=14,height=7)
+
+p2 <- DensityPlot(densities,'Luminal A','Granulocytes_Macrophages') + DensityPlot(densities,'Luminal A','Fibroblasts') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal A',setdiff(pam_types,'Luminal A'),"Granulocytes_Macrophages_to_Fibroblasts"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalAFeatureexample5.pdf',sep=''),width=14,height=7)
+
+
+```
+
+```{r}
+p1 <- DensityPlot(densities,'Luminal B','CKplus_ERmin_cells') + DensityPlot(densities,'Luminal B','CKmed_ERorHER2min_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal B',setdiff(pam_types,'Luminal B'),"CK+_ER-_cells_to_CKmed_ERorHER2-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalBFeatureexample.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Luminal B','Granulocytes_Macrophages') + DensityPlot(densities,'Luminal B','CKmed_ERorHER2min_cells') +
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Luminal B',setdiff(pam_types,'Luminal B'),"Granulocytes_Macrophages_to_CKmed_ERorHER2-_cells"  )  +
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'LuminalBFeatureexample2.pdf',sep=''),width=14,height=7)
+
+
+
+```
+
+
+
+```{r}
+p1 <- DensityPlot(densities,'Normal-like','HER2plus_cells') + DensityPlot(densities,'Normal-like','HER2plus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Normal-like',setdiff(pam_types,'Normal-like'),"HER2+_cells_to_HER2+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'NormalFeatureexample.pdf',sep=''),width=14,height=7)
+
+p2 <- DensityPlot(densities,'Normal-like','HER2plus_cells') + DensityPlot(densities,'Normal-like','CD8plus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Normal-like',setdiff(pam_types,'Normal-like'),"HER2+_cells_to_CD8+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'NormalFeatureexample2.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Normal-like','Basal') + DensityPlot(densities,'Normal-like','CD8plus_cells') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Normal-like',setdiff(pam_types,'Normal-like'),"Basal_to_CD8+_cells"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'NormalFeatureexample3.pdf',sep=''),width=14,height=7)
+
+p1 <- DensityPlot(densities,'Normal-like','CD4plus_cells_APCs') + DensityPlot(densities,'Normal-like','Ki67plus_cells_epithelial') + 
+          showDistanceCurvesPAM(allParametersAlternative,medians, 'Normal-like',setdiff(pam_types,'Normal-like'),"CD4+_cells_APCs_to_Ki67+_cells_epithelial"  )  + 
+  plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'NormalFeatureexample4.pdf',sep=''),width=14,height=7)
+
+```
+
+## Effect size
+Show only significant features
+
+```{r}
+densities <- getCellProportionsPerImageAlternative() %>% filter(isTumour == T)
+names(densities) <- gsub('_CPh','',names(densities),fixed=T)
+names(densities) <- gsub('_CPh','',names(densities), fixed = T)
+melted_densities <- melt(densities %>% dplyr::select(-c('isTumour')), id = 'ImageNumber')
+phenotypeFrom_merge <- na.omit(merge(allParametersAlternative %>% filter(phenotype_combo %in% (univariateFeatureImportanceSpatial %>% pull(Feature))), melted_densities, by.x=c('tnumber','phenotype_from'), by.y=c('ImageNumber', 'variable')))
+phenotypeTo_merge <- na.omit(merge(allParametersAlternative %>% filter(phenotype_combo %in% (univariateFeatureImportanceSpatial %>% pull(Feature))), melted_densities, by.x=c('tnumber','phenotype_to'), by.y=c('ImageNumber', 'variable')))
+phenotypeFrom_merge <- merge(phenotypeFrom_merge, clinical_data %>% dplyr::select(c(ImageNumber, PAM50)),by.x='tnumber', by.y = 'ImageNumber')
+phenotypeTo_merge <- merge(phenotypeTo_merge, clinical_data %>% dplyr::select(c(ImageNumber, PAM50)),by.x='tnumber', by.y = 'ImageNumber')
+
+
+phenotypeFromShape <- phenotypeFrom_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>%
+  summarize(cor=cor(shape, value,method = 'pearson'))
+
+phenotypeFromShape_pvalue <- phenotypeFrom_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>% summarize(cor.test(shape,value)[["p.value"]]) %>% rename(cor_pvalue = "cor.test(shape, value)[[\"p.value\"]]")
+
+phenotypeFromScale <- phenotypeFrom_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>%
+  summarize(cor=cor(scale, value))
+
+phenotypeFromScale_pvalue <- phenotypeFrom_merge %>%
+  group_by(phenotype_combo,PAM50) %>% filter(n() >= 3) %>% summarize(cor.test(scale,value)[["p.value"]]) %>% rename(corpvalue = "cor.test(scale, value)[[\"p.value\"]]")
+
+phenotypeFromShape <- merge(phenotypeFromShape, phenotypeFromScale_pvalue, by=c('phenotype_combo','PAM50'))
+phenotypeFromScale <- merge(phenotypeFromScale, phenotypeFromScale_pvalue, by=c('phenotype_combo','PAM50'))
+
+phenotypeFrom <- merge(na.omit(phenotypeFromShape), na.omit(phenotypeFromScale), by=c('phenotype_combo','PAM50'))
+phenotypeFrom <- phenotypeFrom %>% separate(phenotype_combo, into=c('phenotype_from', 'phenotype_to'),sep='_to_',remove=F)
+phenotypeFrom <- phenotypeFrom %>% unite('unique_id',c(phenotype_combo, PAM50) ,sep='_in_',remove=F)
+
+sig_features <- univariateFeatureImportanceSpatial %>% filter(Sig == T)%>% unite('unique_id',c(Feature, response) ,sep='_in_',remove=F) %>% pull(unique_id)
+
+phenotypeFrom <- phenotypeFrom %>% filter(unique_id %in% sig_features)
+phenotypeFrom <- merge(phenotypeFrom, univariateFeatureImportanceSpatial %>% filter(Sig == T) %>% unite('unique_id',c(Feature, response) ,sep='_in_',remove=F), by='unique_id')
+# phenotypeFrom <- phenotypeFrom %>% separate(feature_id, c('phenotype_combo', 'response'), sep = '_in_')
+
+phenotypeFrom <- phenotypeFrom %>% mutate(adjusted_px = adjust_pvalue(corpvalue.x, method = 'BH'))
+phenotypeFrom <- phenotypeFrom %>% mutate(adjusted_py = adjust_pvalue(corpvalue.y, method = 'BH'))
+
+p1 <- ggplot() +geom_hline(yintercept = 0, linetype='dashed')  +geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(data=(phenotypeFrom %>% filter(adjusted_px >= 0.05 | adjusted_py >= 0.05)) ,aes(x=cor.x, y=cor.y),color='grey') + 
+  geom_point(data=(phenotypeFrom %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 )),aes(x=cor.x, y=cor.y,colour=response)) + 
+  theme_bw() + xlab('Pearson correlation shape- reference cell type fraction')+ ylab('Pearson correlation scale - reference cell type fraction') + xlim(-1,1) + ylim(-1,1.3) + geom_label_repel(data=(phenotypeFrom %>% filter(!(cor.x > 0 & cor.y < 0)) %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 ) %>% distinct(cor.x, cor.y,phenotype_combo,response)), aes(x=cor.x,y=cor.y, label=gsub('_', ' ',phenotype_combo),fill=response),size=4,color='white',segment.color='black', max.overlaps=100,force=1000) + scale_color_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + scale_fill_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + guides(fill="none") + plot_annotation(tag_level='A')
+
+# ggsave(paste(outdir, 'effectSizePlot_referenceType.pdf',sep=''),width=7,height=5)
+
+phenotypeToShape <- phenotypeTo_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>%
+  summarize(cor=cor(shape, value,method = 'pearson'))
+
+phenotypeToShape_pvalue <- phenotypeTo_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>% summarize(cor.test(shape,value)[["p.value"]]) %>% rename(cor_pvalue = "cor.test(shape, value)[[\"p.value\"]]")
+
+phenotypeToScale <- phenotypeTo_merge %>%
+  group_by(phenotype_combo, PAM50) %>% filter(n() >= 3) %>%
+  summarize(cor=cor(scale, value))
+
+phenotypeToScale_pvalue <- phenotypeTo_merge %>%
+  group_by(phenotype_combo,PAM50) %>% filter(n() >= 3) %>% summarize(cor.test(scale,value)[["p.value"]]) %>% rename(corpvalue = "cor.test(scale, value)[[\"p.value\"]]")
+
+phenotypeToShape <- merge(phenotypeToShape, phenotypeToScale_pvalue, by=c('phenotype_combo','PAM50'))
+phenotypeToScale <- merge(phenotypeToScale, phenotypeToScale_pvalue, by=c('phenotype_combo','PAM50'))
+
+phenotypeTo <- merge(na.omit(phenotypeToShape), na.omit(phenotypeToScale), by=c('phenotype_combo','PAM50'))
+phenotypeTo <- phenotypeTo %>% separate(phenotype_combo, into=c('phenotype_To', 'phenotype_to'),sep='_to_',remove=F)
+phenotypeTo <- phenotypeTo %>% unite('unique_id',c(phenotype_combo, PAM50) ,sep='_in_',remove=F)
+
+sig_features <- univariateFeatureImportanceSpatial %>% filter(Sig == T)%>% unite('unique_id',c(Feature, response) ,sep='_in_',remove=F) %>% pull(unique_id)
+
+phenotypeTo <- phenotypeTo %>% filter(unique_id %in% sig_features)
+phenotypeTo <- merge(phenotypeTo, univariateFeatureImportanceSpatial %>% filter(Sig == T) %>% unite('unique_id',c(Feature, response) ,sep='_in_',remove=F), by='unique_id')
+# phenotypeTo <- phenotypeTo %>% separate(feature_id, c('phenotype_combo', 'response'), sep = '_in_')
+
+phenotypeTo <- phenotypeTo %>% mutate(adjusted_px = adjust_pvalue(corpvalue.x, method = 'BH'))
+phenotypeTo <- phenotypeTo %>% mutate(adjusted_py = adjust_pvalue(corpvalue.y, method = 'BH'))
+
+p2 <- ggplot() +geom_hline(yintercept = 0, linetype='dashed')  +geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(data=(phenotypeTo %>% filter(adjusted_px >= 0.05 | adjusted_py >= 0.05)) ,aes(x=cor.x, y=cor.y),color='grey') + 
+  geom_point(data=(phenotypeTo %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 )),aes(x=cor.x, y=cor.y,colour=response)) + 
+  theme_bw() + xlab('Pearson correlation shape- target cell type fraction')+ ylab('Pearson correlation scale - target cell type fraction') + xlim(-1,1) + ylim(-1,1.3) + geom_label_repel(data=(phenotypeTo %>% filter(!(cor.x > 0 & cor.y < 0)) %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 ) %>% distinct(cor.x, cor.y,phenotype_combo,response)), aes(x=cor.x,y=cor.y, label=gsub('_', ' ',phenotype_combo),fill=response),size=4,color='white',segment.color='black', max.overlaps=100,force=1000) + scale_color_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + scale_fill_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + guides(fill="none") + plot_annotation(tag_level='A')
+
+# ggsave(paste(outdir, 'effectSizePlot_referenceType.pdf',sep=''),width=7,height=5)
+p_total <- p1 + p2  + plot_layout(guides = "collect")
+ 
+ggsave(paste(outdir, 'effectSizePlots.pdf',sep=''),width=14,height=5)
+
+```
+```{r}
+
+p3 <- ggplot() +geom_hline(yintercept = 0, linetype='dashed')  +geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(data=(phenotypeFrom %>% filter(adjusted_px >= 0.05 | adjusted_py >= 0.05)) ,aes(x=cor.x, y=cor.y),color='grey') + 
+  geom_point(data=(phenotypeFrom %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 )),aes(x=cor.x, y=cor.y,colour=response)) + 
+  theme_bw() + xlab('Pearson correlation shape- reference cell type fraction')+ ylab('Pearson correlation scale - reference cell type fraction') + xlim(-1,1) + ylim(-1,1.3) + geom_label_repel(data=(phenotypeFrom %>% filter(adjusted_px >= 0.05 & adjusted_py >= 0.05)  %>% distinct(cor.x, cor.y,phenotype_combo,response)), aes(x=cor.x,y=cor.y, label=gsub('_', ' ',phenotype_combo),fill=response),size=2,color='white',segment.color='black',max.overlaps=100,force=100) + scale_color_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + scale_fill_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + guides(fill="none") + plot_annotation(tag_level='A')
+
+
+p4 <- ggplot() +geom_hline(yintercept = 0, linetype='dashed')  +geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(data=(phenotypeTo %>% filter(adjusted_px >= 0.05 | adjusted_py >= 0.05)) ,aes(x=cor.x, y=cor.y),color='grey') + 
+  geom_point(data=(phenotypeTo %>% filter(adjusted_px < 0.05 & adjusted_py < 0.05 )),aes(x=cor.x, y=cor.y,colour=response)) + 
+  theme_bw() + xlab('Pearson correlation shape- target cell type fraction')+ ylab('Pearson correlation scale - target cell type fraction') + xlim(-1,1) + ylim(-1,1.3) + geom_label_repel(data=(phenotypeTo  %>% filter(adjusted_px >= 0.05 & adjusted_py >= 0.05) %>% distinct(cor.x, cor.y,phenotype_combo,response)), aes(x=cor.x,y=cor.y, label=gsub('_', ' ',phenotype_combo),fill=response),size=4,color='white',segment.color='black', ylim=c(0.1, NA),force=500) + scale_color_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + scale_fill_manual(breaks = colors %>% pull(name), values=colors %>% pull(color)) + guides(fill="none") + plot_annotation(tag_level='A')
+
+p_total <- p3 + p4  + plot_layout(guides = "collect")
+ 
+ggsave(paste(outdir, 'effectSizePlots_notCorrelated.pdf',sep=''),width=14,height=5)
+
+```
+
+
+## Fisher exact test
+
+```{r}
+significant_features <- univariateFeatureImportanceSpatial %>% filter(Sig == T)
+significant_features <- significant_features %>% separate(Feature, into = c('phenotype_from', 'phenotype_to'), sep='_to_')
+
+significant_features$response <- factor(significant_features$response, levels = c('Basal', 'HER2', 'Luminal A', 'Luminal B', 'Normal-like'))
+significant_features$phenotype_from <- factor(significant_features$phenotype_from, levels = c(cPh_tme, cPh_tumour))
+
+fisher_phenotypeFrom <- data.frame(matrix(nrow=0,ncol=2))
+for (f in c(cPh_tme, cPh_tumour)){
+  print(f)
+  t <- data.frame(significant_features %>%group_by(response) %>% dplyr::count(phenotype_from, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_from == f))
+  rownames(t) <- t$response
+  t <- t %>% dplyr::select(-c(response,phenotype_from))
+  
+  fisher_phenotypeFrom <- rbind(fisher_phenotypeFrom, c(f, fisher.test(t)$p.value))
+  
+}
+
+colnames(fisher_phenotypeFrom) <- c('phenotype_from', 'p_value')
+fisher_phenotypeFrom <- fisher_phenotypeFrom %>% mutate(adjusted_pvalue = p.adjust(fisher_phenotypeFrom$p_value, method = "BH"))
+print(fisher_phenotypeFrom)
+print(fisher_phenotypeFrom %>% filter(adjusted_pvalue < 0.05))
+
+significant_features %>%group_by(response) %>% dplyr::count(phenotype_from, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_from == 'Myofibroblasts')
+
+
+
+
+```
+
+```{r}
+significant_features <- univariateFeatureImportanceSpatial %>% filter(Sig == T)
+significant_features <- significant_features %>% separate(Feature, into = c('phenotype_from', 'phenotype_to'), sep='_to_')
+
+significant_features$response <- factor(significant_features$response, levels = c('Basal', 'HER2', 'Luminal A', 'Luminal B', 'Normal-like'))
+significant_features$phenotype_to <- factor(significant_features$phenotype_to, levels = c(cPh_tme, cPh_tumour))
+
+fisher_phenotypeTo <- data.frame(matrix(nrow=0,ncol=2))
+for (f in c(cPh_tme, cPh_tumour)){
+  print(f)
+  t <- data.frame(significant_features %>%group_by(response) %>% dplyr::count(phenotype_to, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_to == f))
+  rownames(t) <- t$response
+  t <- t %>% dplyr::select(-c(response,phenotype_to))
+  
+  fisher_phenotypeTo <- rbind(fisher_phenotypeTo, c(f, fisher.test(t)$p.value))
+  
+}
+
+
+colnames(fisher_phenotypeTo) <- c('phenotype_to', 'p_value')
+fisher_phenotypeTo <- fisher_phenotypeTo %>% mutate(adjusted_pvalue = p.adjust(fisher_phenotypeTo$p_value, method = "BH"))
+print(fisher_phenotypeTo %>% filter(adjusted_pvalue < 0.05))
+
+significant_features %>%group_by(response) %>% dplyr::count(phenotype_to, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_to == 'CD4+_cells_APCs')
+significant_features %>%group_by(response) %>% dplyr::count(phenotype_to, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_to == 'Fibroblasts')
+significant_features %>%group_by(response) %>% dplyr::count(phenotype_to, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_to == 'Granulocytes_Macrophages')
+significant_features %>%group_by(response) %>% dplyr::count(phenotype_to, .drop=F)  %>% mutate(not = 18-n) %>% filter(phenotype_to == 'Basal')
+
+
+
+```
+

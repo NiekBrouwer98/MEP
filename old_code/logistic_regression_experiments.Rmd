@@ -1,0 +1,322 @@
+---
+title: "Logistic Regression Predictions"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+In this document we are going to predict subtypes based on the feature sets using logistic regression.
+
+```{r, include =FALSE}
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(parallel)
+library(here)
+library(fst)
+library(assertthat)
+library(RColorBrewer)
+library(cowplot)
+library(ggpubr)
+library(gtools)
+source(here("UtilityFunctions.R"))
+source(here('MEP_UtilityFunctions.R'))
+source(here('logisticRegression_methods.R'))
+source(here('figure_styling.R'))
+
+library('glmnet', quiet = T)
+library(glmnetUtils)
+library('ROCR', quiet = T)
+library(ComplexHeatmap)
+library(caret)
+library(pROC)
+library(helfRlein)
+library(splitTools)
+
+# set seed
+projectSeed <- 89230689
+set.seed(projectSeed)
+
+outDir <- here('scratch')
+cells <- getCellsAlternative()
+structures <- getStructures()
+TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
+ptLevelTMEinteractions <- read_fst(here('scratch/ptLeveLTMEInteractions.fst'), as.data.table=T)
+NetworkProperties <- readRDS(here('scratch/NetworkProperties.rds'))
+clinical_data <- getClinical()
+init_predictors <- predictorInitialFile()
+# colnames(init_predictors) <- gsub("[^A-Za-z0-9+\\-]", "", colnames(init_predictors))
+
+```
+
+The training dataset increases in size because the shape and scale parameters are computed per image instead of per patient. It also considers tissues with only tumor or only TME cells. These images are removed in the originial prediction experiment.
+
+Calculate TME structures, proportions and network properties per slide instead of sample.
+
+```{r, include = FALSE}
+TMEStructurePredictors <- c("TMEStructure1", "TMEStructure2", "TMEStructure3", "TMEStructure4", "TMEStructure5", "TMEStructure6", "TMEStructure7", "TMEStructure8", "TMEStructure9", "TMEStructure10")
+
+cellPhenotypes <- here('scratch/cellPhenotypeProportionsAlternative.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+                         y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+                         by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+                        by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+# cellPhenotypes[, meta_description := paste0(meta_description, '_CPh')]
+cPh_tumour <- setdiff(c(cellPhenotypes[type == 'tumour', unique(meta_description)],'Basal_cells'),'Basal')
+cPh_tme <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+
+
+cellPhenotypes <- here('scratch/cellPhenotypeProportions.fst')
+cellPhenotypes <- read_fst(cellPhenotypes, as.data.table = T)
+cellPhenotypes <- cellPhenotypes[grep('tumour|stroma', type)]
+cellPhenotypes <- cellPhenotypes[, .(ImageNumber, type, meta_description, proportion)]
+allCombinations <- adt(expand.grid(unique(cellPhenotypes[,ImageNumber]), unique(cellPhenotypes[,meta_description])))
+setnames(allCombinations, c('ImageNumber', 'meta_description'))
+allCombinations <- merge(x = allCombinations, 
+                         y = cellPhenotypes[!duplicated(meta_description), .(meta_description, type)], 
+                         by = 'meta_description') 
+cellPhenotypes <- merge(x = allCombinations, y = cellPhenotypes, 
+                        by = c('ImageNumber', 'meta_description', 'type'), all.x = T) 
+cellPhenotypes[, meta_description := gsub("[^A-Za-z0-9+\\-]", "", meta_description)]
+cellPhenotypes[, meta_description := paste0(meta_description, '_originalType')]
+cPh_tumour_original <- cellPhenotypes[type == 'tumour', unique(meta_description)]
+cPh_tme_original <- cellPhenotypes[type == 'stroma', unique(meta_description)]
+
+nwP <- here('scratch/NetworkProperties.rds')
+nwP <- read_rds(nwP)
+standardiseNwP <- function(name){
+  dt <- nwP[[name]]
+  setnames(dt, grep('communities_', names(dt), value = TRUE), 'communityID')
+  dt[, type := name]
+  return(dt)
+}
+nwP <- rbindlist(lapply(c('stroma', 'tumour'), standardiseNwP))
+IDs <- getCells()[, .(ImageNumber, metabric_id)][, .SD[1], by = ImageNumber]
+nwP <- merge(x = nwP, y = IDs, by = 'ImageNumber') 
+nwP[, assortativity := NULL] #has NAs
+measureVars <- grep('ImageNumber|communityID|type|metabric_id', names(nwP), 
+                    invert = TRUE, value = TRUE)
+PtmeasureVars <- paste0(measureVars, 'PtMean')
+nwP[, eval(PtmeasureVars) := lapply(.SD, mean), by = .(type, ImageNumber), .SDcols = measureVars]
+nwP <- nwP[, .SD[1], by = .(type, ImageNumber)]
+nwP <- nwP[, .SD, .SDcols = c('ImageNumber', 'type', PtmeasureVars)]
+nwP <- melt(nwP, id.vars = c('ImageNumber', 'type'))
+nwP[, variable := paste0(variable, '_', type)]
+nwP <- dcast(nwP, ImageNumber ~ variable)
+nwP <- na.omit(nwP)
+nwPredictorsTumour <- grep('_tumour', names(nwP), invert = F, value = T)
+nwPredictorsTME <- grep('_stroma', names(nwP), invert = F, value = T)
+
+rm(nwP, cellPhenotypes)
+
+```
+
+Test different filters.
+
+```{r}
+toModel <- apply_filtering(init_predictors, 100)
+#use 70% of dataset as training set and 30% as test set
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$PAM50, k = 5)
+
+for (percentage in seq(100,5,-5)){
+  print(percentage)
+  for (i in 1:length(folds)){
+    print(i)
+    train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+    
+    toModel <- apply_filtering(init_predictors, percentage)
+    toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+    toModel <- split(toModel, by = 'isTestCohort')
+
+    shapePredictors <- grep('shape', names(toModel$train), value = T)
+    scalePredictors <- grep('scale', names(toModel$train), value = T)
+    distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+    distance_predictors <- list(shapePredictors,scalePredictors,distPredictors)
+    name_distance_predictors <-  c('Shape features','Scale features','Shape and scale features')
+    
+    responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+    outputfile = paste(here('scratch/glmnetAUCs_PAM_'),percentage, 'filter_test',i , '.fst',sep='')
+    fitAndEstimate(distance_predictors,name_distance_predictors, outfile = outputfile, df= toModel)
+    
+  }
+}
+
+```
+
+Rerun the experiments with cross-validation for all other feature sets.
+
+```{r}
+filtering_percentage <- 100
+
+toModel <- apply_filtering(init_predictors, filtering_percentage)
+#use 70% of dataset as training set and 30% as test set
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$PAM50, k = 5)
+```
+
+
+```{r}
+for (i in 1:length(folds)){
+  train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+  
+  toModel <- apply_filtering(init_predictors, filtering_percentage)
+  toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+  toModel <- split(toModel, by = 'isTestCohort')
+
+  shapePredictors <- grep('shape', names(toModel$train), value = T)
+  scalePredictors <- grep('scale', names(toModel$train), value = T)
+  distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+  AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
+  all_predictors <- list(cPh_tumour, cPh_tme, shapePredictors, scalePredictors, distPredictors, AllPredictors)
+  name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)','Shape features','Scale features','Shape and scale features', 'Combined')
+ 
+  responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+  outputfile = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_lasso_test'), i, '.fst', sep='')
+  
+  fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
+  
+}
+```
+Also predict based on original cell type density features.
+```{r}
+source(here('logisticRegression_methods.R'))
+
+filtering_percentage <- 100
+
+toModel <- apply_filtering(init_predictors, filtering_percentage)
+#use 70% of dataset as training set and 30% as test set
+toModel_clinical <- (clinical_data %>% filter(ImageNumber %in% toModel$ImageNumber))
+folds <- create_folds(toModel_clinical$PAM50, k = 5)
+
+for (i in 1:length(folds)){
+  train <- toModel_clinical[folds[[i]], ] %>% pull(ImageNumber)
+  
+  toModel <- apply_filtering(init_predictors, 100)
+  toModel <- toModel %>% mutate(isTestCohort = ifelse(ImageNumber %in% train, 'train','test'))
+  toModel <- split(toModel, by = 'isTestCohort')
+  shapePredictors <- grep('shape', names(toModel$train), value = T)
+  scalePredictors <- grep('scale', names(toModel$train), value = T)
+
+  all_predictors <- list(cPh_tumour_original, cPh_tme_original)
+  name_predictors <-  c('Original cell phenotype (Tumour)', 'Original cell phenotype (TME)')
+ 
+  responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+  outputfile = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_original_test'), i, '.fst', sep='')
+  
+  fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel)
+  
+}
+```
+
+
+
+### Final predictions
+Rerun the experiment while saving rocs and coefficient lists.
+
+```{r}
+toModel <- apply_filtering(init_predictors, 100)
+toModel <- split(toModel, by = 'isTestCohort')
+responseVars <- c('Luminal A','Luminal B', 'HER2', 'Basal', 'Normal-like')
+shapePredictors <- grep('shape', names(toModel$train), value = T)
+scalePredictors <- grep('scale', names(toModel$train), value = T)
+distPredictors <- grep('shape|scale', names(toModel$train), value = T)
+AllPredictors <- c(cPh_tumour, cPh_tme, shapePredictors,scalePredictors)
+
+all_predictors <- list(cPh_tumour, cPh_tme,cPh_tumour_original,cPh_tme_original, shapePredictors,scalePredictors,distPredictors ,AllPredictors)
+name_predictors <-  c('Cell phenotype (Tumour)', 'Cell phenotype (TME)','Original cell phenotype (Tumour)', 'Original cell phenotype (TME)','Shape features','Scale features','Shape and scale features', 'Combined')
+
+outputfile = here('scratch/glmnetAUCs_ALL_crossvalidation_v5.fst')
+
+fitAndEstimate(all_predictors,name_predictors, outfile = outputfile, df = toModel) 
+```
+
+## Plot AUCs
+Show effect of filtering on AUCs.
+
+```{r}
+
+MS_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+pam_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+for (s in seq(100, 5, -5)){
+  for (t in seq(1,5,1)){
+      file = paste(here('scratch/LR_models_run2/glmnetAUCs_MS_'), s, 'filter_test', t, '.fst', sep='')
+      MS_allAUCs <- rbind(MS_allAUCs, collect_MolecularSubtypes(file) %>% mutate(colours = s))
+      file = paste(here('scratch/LR_models_run2/glmnetAUCs_PAM_'), s, 'filter_test', t, '.fst', sep='')
+      pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(colours = s))
+    
+  }
+}
+
+p <- plot_grid(generate_plot_filtering(MS_allAUCs),generate_plot_filtering(pam_allAUCs), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCs_filtering_run2.pdf'), p, base_width = 12, base_height = 6)
+
+p <- plot_grid(generate_plot_alphas(MS_allAUCs),generate_plot_alphas(pam_allAUCs), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/intclustAndPAM_AUCsWithAlphas_filtering_run2.pdf'), p, base_width = 12, base_height = 6)
+
+```
+
+```{r}
+MS_allAUCs_means <- MS_allAUCs %>% group_by(response, type,colours,yaxis,facet_by) %>% summarise(mean_auc = mean(auc), sd_auc = sd(auc)) %>% mutate(moe =  qnorm(0.975)*sd_auc/sqrt(5))
+pam_allAUCs_means <- pam_allAUCs %>% group_by(response, type,colours,yaxis,facet_by) %>% summarise(mean_auc = mean(auc), sd_auc = sd(auc)) %>% mutate(moe =  qnorm(0.975)*sd_auc/sqrt(5))
+
+pam_allAUCs_means <- pam_allAUCs_means %>% mutate(features = 324*(colours/100))
+
+ggplot(pam_allAUCs_means)  +
+  # geom_ribbon(aes(x=colours, ymin=mean_auc-moe, ymax=mean_auc+moe,colour=facet_by,fill=facet_by), width=.2,position=position_dodge(0.05),alpha=0.2) +
+  geom_line(aes(x=features, y=mean_auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=features, y=mean_auc, colour=facet_by),alpha=0.8) +
+  facet_wrap(~fct_rev(yaxis),nrow=1) + ylab('AUC') + xlab('features included') + xlim(0,324) + theme_bw() + scale_color_manual(name = '',values=getDiscreteColors(3))
+ggsave(here('output/final_figures/Fig4.2/PAM_filtervsauc_run2.pdf'),height=4, width=12)
+
+# ggplot(MS_allAUCs_means) + 
+#   # geom_ribbon(aes(x=colours, ymin=mean_auc-moe, ymax=mean_auc+sd_moe,colour=facet_by,fill=facet_by), width=.2,position=position_dodge(0.05),alpha=0.2) +
+#   geom_line(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) + geom_point(aes(x=colours, y=mean_auc, colour=facet_by),alpha=0.8) +
+#  facet_wrap(~fct_rev(yaxis),nrow=1)  + xlab('% of features included') + xlim(100,0) + theme_bw() + scale_color_manual(values=getDiscreteColors(3))
+# ggsave(here('output/Method_comparison/logistic_regression/MS_filtervsauc_run2.pdf'),height=4, width=10)
+```
+
+Plot results of predictions with all features and show the deviation of the AUC when testing the models with stratified 5-fold (on PAM50 subtypes)
+
+```{r}
+pam_allAUCs <- data.frame(matrix(nrow = 0, ncol=12))
+  for (t in seq(1,5,1)){
+      file = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_lasso_test'), t, '.fst', sep='')
+      pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = t))
+  }
+
+for (t in seq(1,5,1)){
+    file = paste(here('scratch/glmnetAUCs_PAM_crossvalidation_original_test'), t, '.fst', sep='')
+    pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = t))
+  
+}
+
+pam_allAUCs %>% group_by(response,facet_by) %>% summarise(mean_auc = round(mean(auc),2), sd_auc = round(sd(auc),2))
+
+```
+
+Show final performance on fixed train/test set.
+
+```{r}
+file = here('scratch/glmnetAUCs_ALL_crossvalidation_v4.fst')
+pam_allAUCs <- rbind(pam_allAUCs, collect_pam(file) %>% mutate(type = 'test_set'))
+
+p <- plot_grid(generate_plot_withboxplot(MS_allAUCs %>% filter(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)', 'Cell phenotype (Tumour)','Cell phenotype (TME)'))),generate_plot_withboxplot(pam_allAUCs %>% filter(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)', 'Cell phenotype (Tumour)','Cell phenotype (TME)'))), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/MSAndPAM_AUCs_densities_run2.pdf'), p, base_width = 10, base_height = 6)
+
+p <- plot_grid(generate_plot_withboxplot(MS_allAUCs %>% filter(!(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)')))),generate_plot_withboxplot(pam_allAUCs  %>% filter(!(facet_by %in% c('Original cell phenotype (TME)', 'Original cell phenotype (Tumour)')))), ncol = 1)
+save_plot(here('output/Method_comparison/logistic_regression/MSAndPAM_AUCs_ALL_run2.pdf'), p, base_width = 18, base_height = 6)
+```
+
+
+

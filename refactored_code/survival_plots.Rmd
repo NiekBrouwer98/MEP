@@ -1,0 +1,797 @@
+---
+title: "survival_plots"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(glmnet)
+library(here)
+library(ggplot2)
+library(survival)
+library(glmnet)
+library(survival)
+library(survminer)
+library(mice)
+library(data.table)
+library(patchwork)
+
+outdir <- here('output/final_figures/survival/')
+
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here('logisticRegression_methods.R'))
+source(here('figure_styling.R'))
+
+
+set.seed(123)
+```
+
+1. Alle features univariate
+2. Alle features multivariate: kijk naar features die overblijven door feature selection ElasticNet. 
+3. Vergelijk features
+
+```{r}
+cells <- getCellsAlternative()
+structures <- getStructures()
+TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
+ptLevelTMEinteractions <- read_fst(here('scratch/ptLeveLTMEInteractions.fst'), as.data.table=T)
+NetworkProperties <- readRDS(here('scratch/NetworkProperties.rds'))
+clinical_data <- getClinical()
+
+predictors <- predictorInitialFile()
+toModel <- apply_filtering(predictors, 100)
+
+clinical_data <- clinical_data  %>% dplyr::select(c(metabric_id, `ER Status`,`HER2 Status`, DeathBreast, yearsToStatus))
+clinical_data <- na.omit(clinical_data)
+
+
+ImageMetabricIDs <- cells %>% dplyr::select(c(ImageNumber, metabric_id)) %>% distinct()
+toModelWithMetabricID <- merge(toModel, ImageMetabricIDs, by= 'ImageNumber')
+
+TotalDF <- merge(toModelWithMetabricID, clinical_data, by='metabric_id')
+colnames(TotalDF) <- gsub('_CPh','',colnames(TotalDF),fixed = T) 
+```
+
+```{r}
+TMEStructurePredictors <- c("TMEStructure1", "TMEStructure2", "TMEStructure3", "TMEStructure4", "TMEStructure5", "TMEStructure6", "TMEStructure7", "TMEStructure8", "TMEStructure9", "TMEStructure10")
+cPh_tme <- c("B cells","CD38+_cells","CD4+_cells_APCs","CD57+_cells","CD8+_cells","Endothelial","Fibroblasts","Granulocytes_Macrophages","Myofibroblasts", 'Ki67+_cells_TME')
+cPh_tumour <- c("CK+_ER+_cells","CK+_ER-_cells","CK-MHC+_cells","CK-_cells","CKmed_ERorHER2-_cells", 'Basal_cells', 'HER2+_cells', 'Ki67+_cells_epithelial')
+cPh_tme_original <- c("Bcells_originalType","CD38+lymphocytes_originalType","CD4+Tcells_originalType","CD4+TcellsAPCs_originalType","CD57+_originalType","CD8+Tcells_originalType","Endothelial_originalType","Fibroblasts_originalType","FibroblastsFSP1+_originalType","Granulocytes_originalType","Ki67+_originalType","Macrophages_originalType","Macrophagesgranulocytes_originalType","Myofibroblasts_originalType","MyofibroblastsPDPN+_originalType","TRegTEx_originalType" )
+cPh_tumour_original <- c("Basal_originalType","CD15+_originalType","CK8-18+ERhi_originalType","CK8-18hiCXCL12hi_originalType","CK8-18hiERlo_originalType","CK+CXCL12+_originalType","CKloERlo_originalType","CKloERmed_originalType","CKmedERlo_originalType","ERhiCXCL12+_originalType","EpCD57+_originalType","EpKi67+_originalType","HER2+_originalType","MHCIIIhi_originalType","MHCIhiCD57+_originalType","MHChiCD15+_originalType")
+
+shapePredictors <- grep('shape', colnames(toModel), value = T)
+scalePredictors <- grep('scale', colnames(toModel), value = T)
+
+```
+
+
+## Cox proportional hazards model
+
+```{r}
+nofiltering_features <- c(cPh_tme, cPh_tumour, 'HER2Status','ERStatus','yearsToStatus', 'DeathBreast')
+nofiltering_features <- gsub('+','plus', nofiltering_features,fixed=T)
+nofiltering_features <- gsub('-','min', nofiltering_features,fixed=T)
+nofiltering_features <- gsub('_','', nofiltering_features,fixed=T)
+nofiltering_features <- gsub(' ','', nofiltering_features,fixed=T)
+
+
+removeSparseFeatures <- function(DF){
+
+  cols_to_keep <- rownames(data.frame(colMeans(DF == 0)) %>% filter(colMeans.DF....0. < 0.5))
+  cols_to_keep <- union(cols_to_keep, nofiltering_features)
+
+  filtered_df <- DF %>% dplyr::select(all_of(cols_to_keep))
+  
+  return(filtered_df)
+
+}
+
+
+subsetDF <- function(Dt, ER = NULL){
+   if(!is.null(ER)) {
+      if(grepl('ositive|\\+', ER)) {
+         Dt <- Dt[`ERStatus` == 1]
+         suffix <- 'ERpos'
+      }else{
+         Dt <- Dt[`ERStatus` == 0]
+         suffix <- 'ERneg'
+      }
+   }
+   else suffix <- 'AllPts'
+   
+   return(Dt)
+}
+
+
+univariateCox <- function(df,predictor, ER = NULL){
+  df <- subsetDF(df, ER)
+  df <- df %>% rename(predictor_column = predictor)
+  if(!(predictor %in% nofiltering_features) ){
+      df <- df %>% filter(!(df[, predictor_column] == 0 ))
+  }
+  
+  if(nrow(df) < 50){
+    # print(predictor)
+    return(data.frame(matrix(nrow=0, ncol=5)))
+  }
+  
+  if (predictor == 'HER2Status'){
+      res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor_column, data = df)
+  }else{
+      res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor_column + HER2Status, data = df)
+
+  }
+  
+  # return(res.cox)
+  
+  return(tidy(res.cox) %>% mutate(term = ifelse(term == 'predictor_column', predictor, paste(predictor, 'HER2'))))
+}
+
+
+multivariateCox <- function(df, predictors, ER= NULL){
+  df <- subsetDF(df, ER)
+  x = df %>% dplyr::select(predictors)
+  y = Surv(df$yearsToStatus, df$DeathBreast)
+  cvfit <- cv.glmnet(as.matrix(x), y, alpha = 1, family = "cox")
+  
+  return(cvfit)
+}
+
+
+transformNames <- function(names){
+  names <- gsub('plus','+', names,fixed=T)
+  names <- gsub('min','-', names,fixed=T)
+  names <- gsub('shape', 'shape ', names,fixed=T)
+  names <- gsub('scale', 'scale ', names,fixed=T)
+  names <- gsub('to', ' to ', names,fixed=T)
+  
+  return(names)
+}
+
+```
+
+For all samples (not stratified on ER/HER2)
+
+```{r}
+DF <- TotalDF %>% dplyr::select(all_of(c('HER2 Status','ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme, shapePredictors, scalePredictors)))
+colnames(DF) <- gsub('+','plus', colnames(DF),fixed=T)
+colnames(DF) <- gsub('-','min', colnames(DF),fixed=T)
+colnames(DF) <- gsub('_','', colnames(DF),fixed=T)
+colnames(DF) <- gsub(' ','', colnames(DF),fixed=T)
+
+DF <- DF %>% mutate(HER2Status = ifelse(HER2Status == 'Positive', 1, 0))
+DF <- DF %>% mutate(ERStatus = ifelse(ERStatus == 'Positive', 1, 0))
+
+result <- data.frame(matrix(nrow = 0, ncol=5))
+for (f in setdiff(colnames(DF),c('yearsToStatus', 'DeathBreast'))){
+  result <- rbind(result, (univariateCox(DF, f)))
+}
+adjusted_pvalues <- p.adjust(result$p.value, method = 'BH')
+
+result <- result %>% mutate(adjusted_p = adjusted_pvalues)
+result <- result %>% mutate(term = gsub('ERorHER2min','',term))
+
+result <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T))
+result_top10 <- result
+
+print(nrow(result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)))
+
+result_all <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)
+
+result_all <- result_all %>% filter(!(term %in% c('HER2Status', 'ERStatus')) )
+
+```
+
+
+ER positive and negative.
+
+```{r}
+result <- data.frame(matrix(nrow = 0, ncol=5))
+
+for (f in setdiff(colnames(DF),c('yearsToStatus', 'DeathBreast'))){
+  result <- rbind(result, (univariateCox(DF, f, ER = '+')))
+}
+
+adjusted_pvalues <- p.adjust(result$p.value, method = 'BH')
+
+result <- result %>% mutate(adjusted_p = adjusted_pvalues)
+result <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T))
+result <- result %>% mutate(term = gsub('ERorHER2-','',term))
+
+print(nrow(result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)))
+result <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)
+top10_ERpos <- result
+
+result <- data.frame(matrix(nrow = 0, ncol=5))
+for (f in setdiff(colnames(DF),c('yearsToStatus', 'DeathBreast'))){
+  result <- rbind(result, (univariateCox(DF, f, ER = '-')))
+}
+
+adjusted_pvalues <- p.adjust(result$p.value, method = 'BH')
+
+result <- result %>% mutate(adjusted_p = adjusted_pvalues)
+result <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T))
+result <- result %>% mutate(term = gsub('ERorHER2-','',term))
+
+print(nrow(result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)))
+result <- result %>% filter(term %in% grep(' HER2',term,invert=T,value=T)) %>% filter(adjusted_p < 0.05)
+top10_ERmin <- result
+
+```
+
+
+```{r}
+library(patchwork)
+
+forestPlot <- function(df,adjust){
+  df$term <- transformNames(df$term)
+  df <- df %>% mutate(sig = ifelse(adjusted_p < 0.05, ifelse(adjusted_p < 0.001, '**', '*'), ''))
+  df <- df %>% mutate(col = ifelse(estimate < 0, 'neg', 'pos'))
+  
+  df$term <- factor(df$term, levels = rev(df$term))
+  
+  f <- ggplot(df, aes(x = exp(estimate), y = term)) +
+  geom_point(aes(colour=col)) +
+  geom_errorbarh(aes(xmin = exp(estimate - (2 * std.error)), xmax = exp(estimate + (2 * std.error)), colour=col)) +
+  geom_text(aes(x=(5*max(exp(df$estimate + (2 * df$std.error))))+0.5, y=term, label=paste('p =', format(round(adjusted_p, 5), scientific=T))),size=3) + 
+  geom_text(aes(x=(15*max(exp(df$estimate + (2 * df$std.error)))+adjust), y=term, label=' '),size=3) +
+  geom_vline(xintercept = 1,linetype=2,color='black',alpha=0.5) +
+  geom_vline(xintercept = 0,linetype=1,color='grey',alpha=0.5) +
+  theme_bw() + 
+    theme(axis.text.y = element_text(size = 9),panel.grid.minor.y = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      panel.grid.major.y = element_blank(),plot.title = element_text(hjust=0.4)) + ylab('') + xlab('Hazard ratio') +  scale_colour_manual(breaks = c('neg','pos'), values = c("#117733","#CC6677" ) ) +
+  theme(legend.position="none") + scale_x_continuous(trans='log2', breaks=c(0,1,round(max(exp(df$estimate + (2 * df$std.error)))))+1)
+
+  return(f)
+}
+
+forestDF <- rbind(result_all %>% filter(!(term == 'HER2Status')) %>% slice_min(order_by = adjusted_p, n=10))
+p1 <- forestPlot(forestDF,0.65)
+p2 <- forestPlot(result_all %>% filter(term %in% grep('shape|scale', result_all %>% pull(term), value=T, invert = T)) %>% filter(!(term %in% c('HER2Status'))),0.65)
+p_total <- (p2 / p1) + plot_annotation(tag_level='A') + plot_layout(ncol=1,heights=c(1,2))
+
+ggsave(paste(outdir,'univariateTop10.pdf'),height=6,width=8)
+
+p2 <- forestPlot(top10_ERpos %>% filter(term %in% grep('shape|scale', top10_ERpos %>% pull(term), value=T)) %>% filter(!(term == 'HER2Status')) %>% slice_min(n = 10, order_by = adjusted_p),0.65) + ggtitle('ER positive')
+p1 <- forestPlot(top10_ERpos %>% filter(term %in% grep('shape|scale', top10_ERpos %>% pull(term), value=T, invert = T)) %>% filter(!(term %in% c('HER2Status','Ki67pluscellsTME'))),0.65)
+p_total <- (p1/ p2) + plot_annotation(tag_level='A') + plot_layout(ncol=1,heights=c(1,2))
+
+
+ggsave(paste(outdir,'univariateTop10_ERpositive.pdf'),height=6,width=8) 
+
+# p3 <- forestPlot(top10_ERmin %>% filter(!(term == 'HER2Status')) %>% slice_min(n = 10, order_by = adjusted_p),0.5) + ggtitle('ER negative')
+
+
+
+
+```
+
+
+```{r}
+survivalCurve <- function(df,predictor, ER = NULL, s){
+  df <- subsetDF(df, ER)
+  df <- df %>% rename(predictor_column = predictor)
+  if(!(predictor %in% nofiltering_features) ){
+      df <- df %>% filter(!(df[, predictor_column] == 0 ))
+  }
+  
+  # res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor_column + HER2Status, data = df)
+  
+  # p_value <- summary(res.cox)[["logtest"]][["pvalue"]]
+  # 
+  quantiles <- quantile(df$predictor_column, prob=c(s,0.5,0.75), type=1)
+  # 
+  # new_df <- with(df,
+  #              data.frame(predictor_column = c(quantiles[[1]],quantiles[[3]]),
+  #                         HER2Status = c(0,0)
+  #                         )
+  #              )
+  # 
+  # fit <- survfit(res.cox,data=df, newdata = new_df)
+  
+  median <- median(df$predictor_column)
+
+  df <- df %>% mutate(binary_column = ifelse(predictor_column <= quantiles[[1]], 0, 1))
+  
+ survFit <- survfit(Surv(yearsToStatus, DeathBreast) ~ binary_column, data = df)
+ 
+ nPatients <- summary(survFit)$table[,'records']
+ nEvents <- summary(survFit)$table[,'events']
+
+ 
+  mklegendAnnot <- function(pos){
+    legend <- paste0('(', nPatients[pos], '/', nEvents[pos], ')')
+    legendName <- gsub('^[A-Za-z0-9].*=', '', names(nPatients)[pos])
+    if (legendName == 0){
+      legendName <- 'Low'
+    }else{
+      legendName <- 'High'
+    }
+    
+    legend <- paste(legendName, legend)
+    return(legend)
+  }
+  
+ nGroups <- seq_len(length(nPatients))
+ legendLabs <- sapply(nGroups, mklegendAnnot)
+ 
+ print(legendLabs)
+ 
+title <- gsub('to',' to ',gsub('scale','scale ',gsub('shape', 'shape ', predictor)))
+title <- gsub('plus','+', gsub('min','-', title))
+title <- gsub('cells', ' cells',title)
+
+  plot <- (ggsurvplot(survFit, data = df, pval=T, pval.coord = c(0.01, 0.01),legend.title='', legend.labs=legendLabs,palette=c("#CC6677","#88CCEE")) + labs(y = 'Cumulative survival', x = 'Follow-up (years)') + ggtitle(title))$plot + theme(plot.title = element_text(size=10,hjust=0.5))
+
+  # plot <- (ggsurvplot(fit, conf.int = TRUE,legend.title='', legend.labs=c("low", "high"),palette=c("#CC6677","#88CCEE")) + ggtitle(title))$plot  + theme(plot.title = element_text(size=10,hjust=0.5)) + annotate('text', x=5, y=0.1, label=paste('p =',signif(p_value,digits=3)),col='red',size=5) 
+  # theme(legend.key.size = unit(1.5, 'cm')) +
+  # theme(legend.text = element_text(size=10))
+  # 
+  return(plot)
+
+
+}
+
+```
+
+```{r}
+# library(patchwork)
+
+DF <- TotalDF %>% dplyr::select(all_of(c('HER2 Status','ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme, shapePredictors, scalePredictors)))
+colnames(DF) <- gsub('+','plus', colnames(DF),fixed=T)
+colnames(DF) <- gsub('-','min', colnames(DF),fixed=T)
+colnames(DF) <- gsub('_','', colnames(DF),fixed=T)
+colnames(DF) <- gsub(' ','', colnames(DF),fixed=T)
+colnames(DF) <- gsub('ERorHER2min','', colnames(DF),fixed=T)
+
+
+DF <- DF %>% mutate(HER2Status = ifelse(HER2Status == 'Positive', 1, 0))
+DF <- DF %>% mutate(ERStatus = ifelse(ERStatus == 'Positive', 1, 0))
+
+p_total1 <- survivalCurve(DF,(result_all %>% filter(term %in% grep('shape|scale', result_all %>% pull(term), value=T)) %>% slice_min(adjusted_p, n=10) %>% pull(term))[[1]], s=0.7)
+for (f in 2:10){
+  p_total1 <- p_total1 + (survivalCurve(DF,(result_all %>% filter(term %in% grep('shape|scale', result_all %>% pull(term), value=T)) %>% slice_min(adjusted_p, n=10) %>% pull(term))[[f]],s=0.7))
+}
+p_total <- (p_total1)  + plot_annotation(tag_level='A') + plot_layout(ncol=3)
+ggsave(paste(outdir,'survivalplots_univariate.pdf', sep = ''),width=12,height=14)
+
+
+p_total1 <- survivalCurve(DF, setdiff(grep('shape|scale', result_all %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus','Ki67pluscellsepithelial', 'CD57pluscells', 'CD4pluscellsAPCs'))[[1]]) + survivalCurve(DF, setdiff(grep('shape|scale', result_all %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus','Ki67pluscellsepithelial', 'CD57pluscells', 'CD4pluscellsAPCs'))[[2]])
+# for (f in 2:2){
+#   p_total1 <- p_total1 + (survivalCurve(DF,setdiff(grep('shape|scale', result_all %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus','Ki67pluscellsepithelial', 'CD57pluscells', 'CD4pluscellsAPCs'))[[f]]))
+# }
+
+p_total <- (p_total1 )  + plot_annotation(tag_level='A') + plot_layout(ncol=2)
+ggsave(paste(outdir,'survivalplots_univariate_fractions.pdf', sep = ''),width=8,height=4)
+
+
+p_total1 <- survivalCurve(DF,(top10_ERpos %>% filter(term %in% grep('shape|scale', top10_ERpos %>% pull(term), value=T)) %>% slice_min(adjusted_p, n=10) %>% pull(term))[[1]], ER='pos')
+for (f in 2:10){
+  p_total1 <- p_total1 + (survivalCurve(DF,(top10_ERpos %>% filter(term %in% grep('shape|scale', top10_ERpos %>% pull(term), value=T)) %>% slice_min(adjusted_p, n=10) %>% pull(term))[[f]],ER='pos'))
+}
+
+p_total <- (p_total1)  + plot_annotation(tag_level='A') + plot_layout(ncol=3)
+ggsave(paste(outdir,'survivalplots_Erposunivariate.pdf', sep = ''),width=12,height=14)
+
+
+p_total1 <- survivalCurve(DF, setdiff(grep('shape|scale', top10_ERpos %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus','Ki67pluscellsTME'))[[1]], ER='pos') + survivalCurve(DF, setdiff(grep('shape|scale', top10_ERpos %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus','Ki67pluscellsTME'))[[2]], ER='pos')
+# for (f in 2:3){
+#   p_total1 <- p_total1 + (survivalCurve(DF,setdiff(grep('shape|scale', top10_ERpos %>% pull(term), value=T, invert = T),c('HER2Status','ERStatus'))[[f]],ER='pos'))
+# }
+
+p_total <- (p_total1)  + plot_annotation(tag_level='A')  + plot_layout(ncol=2) 
+ggsave(paste(outdir,'survivalplots_ERposunivariate_fractions.pdf', sep = ''),width=8,height=4)
+
+for (i in seq(0.05,0.95,0.05)){
+  print(survivalCurve(DF, 'scaleFibroblaststoEndothelial', ER='pos',i))
+}
+
+```
+
+
+```{r}
+survivalCurve <- function(df,predictor, ER = NULL){
+  df <- subsetDF(df, ER)
+  df <- df %>% rename(predictor_column = predictor)
+  if(!(predictor %in% nofiltering_features) ){
+      df <- df %>% filter(!(df[, predictor_column] == 0 ))
+  }
+  
+  # res.cox <- coxph(Surv(yearsToStatus, DeathBreast) ~ predictor_column + HER2Status, data = df)
+  
+  # p_value <- summary(res.cox)[["logtest"]][["pvalue"]]
+  # 
+  quantiles <- quantile(df$predictor_column, prob=c(.1,.5,.75,0.95), type=1)
+  # 
+  # new_df <- with(df,
+  #              data.frame(predictor_column = c(quantiles[[1]],quantiles[[3]]),
+  #                         HER2Status = c(0,0)
+  #                         )
+  #              )
+  # 
+  # fit <- survfit(res.cox,data=df, newdata = new_df)
+  
+  median <- median(df$predictor_column)
+
+  df <- df %>% mutate(binary_column = 1)
+  
+ survFit <- survfit(Surv(yearsToStatus, DeathBreast) ~ binary_column, data = df)
+ 
+ # nPatients <- summary(survFit)$table[,'records']
+ # nEvents <- summary(survFit)$table[,'events']
+
+ 
+ #  mklegendAnnot <- function(pos){
+ #    legend <- paste0('(', nPatients[pos], '/', nEvents[pos], ')')
+ #    legendName <- gsub('^[A-Za-z0-9].*=', '', names(nPatients)[pos])
+ #    if (legendName == 0){
+ #      legendName <- 'Low'
+ #    }else{
+ #      legendName <- 'High'
+ #    }
+ #    
+ #    legend <- paste(legendName, legend)
+ #    return(legend)
+ #  }
+ #  
+ # nGroups <- seq_len(length(nPatients))
+ # legendLabs <- sapply(nGroups, mklegendAnnot)
+ # 
+ # print(legendLabs)
+ 
+title <- gsub('to',' to ',gsub('scale','scale ',gsub('shape', 'shape ', predictor)))
+title <- gsub('plus','+', gsub('min','-', title))
+title <- gsub('cells', ' cells',title)
+
+  plot <- (ggsurvplot(survFit, data = df, pval=T, pval.coord = c(0.01, 0.01),legend.title='',conf.int = F,palette=c("#CC6677")) + labs(y = 'Cumulative survival', x = 'Follow-up (years)') + ggtitle(title))$plot + theme(plot.title = element_text(size=10,hjust=0.5))
+
+  # plot <- (ggsurvplot(fit, conf.int = TRUE,legend.title='', legend.labs=c("low", "high"),palette=c("#CC6677","#88CCEE")) + ggtitle(title))$plot  + theme(plot.title = element_text(size=10,hjust=0.5)) + annotate('text', x=5, y=0.1, label=paste('p =',signif(p_value,digits=3)),col='red',size=5) 
+  # theme(legend.key.size = unit(1.5, 'cm')) +
+  # theme(legend.text = element_text(size=10))
+  # 
+  return(plot)
+
+
+}
+
+survivalCurve(DF, 'Endothelial')
+ggsave(paste(outdir,'survivalplot_endothelial.pdf', sep = ''),width=5,height=4)
+
+```
+
+
+
+Multivariate cox regression
+
+```{r}
+DF <- TotalDF %>% dplyr::select(all_of(c('HER2 Status','ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme, shapePredictors, scalePredictors)))
+colnames(DF) <- gsub('+','plus', colnames(DF),fixed=T)
+colnames(DF) <- gsub('-','min', colnames(DF),fixed=T)
+colnames(DF) <- gsub('_','', colnames(DF),fixed=T)
+colnames(DF) <- gsub(' ','', colnames(DF),fixed=T)
+
+DF <- removeSparseFeatures(DF)
+
+DF <- DF %>% mutate(HER2Status = ifelse(HER2Status == 'Positive', 1, 0))
+DF <- DF %>% mutate(ERStatus = ifelse(ERStatus == 'Positive', 1, 0))
+
+
+multivariate <- multivariateCox(DF, setdiff(colnames(DF), c('yearsToStatus', 'DeathBreast')))
+coef <- coef(multivariate, s = multivariate$lambda.min)
+coef <- data.frame(coef[,1])
+coef <- tibble(feature = rownames(coef), coefficient = coef[,1])
+coef <- coef %>% filter(coefficient != 0)
+
+# Compute hazard ratios and standard deviations
+hazard_ratios <- exp(coef$coefficient)
+
+coef$feature <- transformNames(coef$feature)
+
+coef <- coef %>% mutate(in_univariate = ifelse(feature %in% transformNames(result_top25 %>% filter(adjusted_p < 0.05) %>% pull(term)), 'Univariate & multivariate', 'Multivariate'))
+
+ggplot(coef) + geom_col(aes(y=feature, x=coefficient,fill=in_univariate)) + theme_minimal() + ylab('') + scale_fill_manual(name = '', values = rev(carto_pal(n=3, 'Safe'))[2:3])
+ggsave(paste(outdir, 'multivariate.pdf',sep=''),height=5,width=9)
+
+
+multivariate <- multivariateCox(DF, setdiff(colnames(DF), c('ERStatus','yearsToStatus', 'DeathBreast')), ER='+')
+coef <- coef(multivariate, s = multivariate$lambda.min)
+coef <- data.frame(coef[,1])
+coef <- tibble(feature = rownames(coef), coefficient = coef[,1])
+coef <- coef %>% filter(coefficient != 0)
+
+# Compute hazard ratios and standard deviations
+hazard_ratios <- exp(coef$coefficient)
+
+coef$feature <- transformNames(coef$feature)
+
+coef <- coef %>% mutate(in_univariate = ifelse(feature %in% transformNames(top25_ERpos %>% filter(adjusted_p < 0.05) %>% pull(term)), 'Univariate & multivariate', 'Multivariate'))
+
+ggplot(coef) + geom_col(aes(y=feature, x=coefficient,fill=in_univariate)) + theme_minimal() + ylab('') + scale_fill_manual(name = '', values = rev(carto_pal(n=3, 'Safe'))[2:3])
+ggsave(paste(outdir, 'multivariate_ERpos.pdf',sep=''),height=5,width=9)
+
+multivariate <- multivariateCox(DF, setdiff(colnames(DF), c('ERStatus','yearsToStatus', 'DeathBreast')), ER='-')
+coef <- coef(multivariate, s = multivariate$lambda.min)
+coef <- data.frame(coef[,1])
+coef <- tibble(feature = rownames(coef), coefficient = coef[,1])
+coef <- coef %>% filter(coefficient != 0)
+
+# Compute hazard ratios and standard deviations
+hazard_ratios <- exp(coef$coefficient)
+
+coef$feature <- transformNames(coef$feature)
+
+coef <- coef %>% mutate(in_univariate = ifelse(feature %in% transformNames(top25_ERmin %>% filter(adjusted_p < 0.05) %>% pull(term)), 'Univariate & multivariate', 'Multivariate'))
+
+ggplot(coef) + geom_col(aes(y=feature, x=coefficient,fill=in_univariate)) + theme_minimal() + ylab('') + scale_fill_manual(name = '', values = rev(carto_pal(n=3, 'Safe'))[2:3])
+ggsave(paste(outdir, 'multivariate_ERmin.pdf',sep=''),height=5,width=9)
+```
+
+
+
+## KM curves
+find stratification
+```{r}
+features <- c("CD4pluscellsAPCs", 'shapeMyofibroblaststoKi67pluscells','shapeEndothelialtoFibroblasts')
+DF_subset <- DF %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+ggplot(DF_subset) + geom_point(aes(x=CD4pluscellsAPCs, y=shapeMyofibroblaststoKi67pluscells))
+ggplot(DF_subset) + geom_point(aes(x=shapeEndothelialtoFibroblasts, y=shapeMyofibroblaststoKi67pluscells))
+ggplot(DF_subset) + geom_point(aes(x=CD4pluscellsAPCs, y=shapeEndothelialtoFibroblasts))
+
+
+```
+
+
+
+```{r}
+mkCategory <- function(vec, nCats){
+   nCats <- 1 / nCats
+   cats <- seq(0, 1, nCats)
+   out <- cut(vec, breaks = unique(quantile(vec, probs = cats)), 
+      labels = F, include.lowest = T)
+   return(out)
+}
+
+
+createOrdinalPredictor <- function(df, predictor, categories){
+  df <- df %>% mutate(ordinal_predictor = mkCategory(df %>% pull(predictor),categories))
+  return(df)
+  
+}
+
+
+createBinaryPredictorWithMedian <- function(df){
+df <- df %>%
+  mutate(across(
+    setdiff(names(.), c(c('ERStatus','yearsToStatus', 'DeathBreast'),grep('shape|scale',names(df),value=T))),
+    ~as.integer(. >= median(.))
+  ))
+
+ df <- df %>%
+    mutate(across(
+      setdiff(names(.), c(c('ERStatus','yearsToStatus', 'DeathBreast'),grep('shape|scale',names(df),value=T,invert = T))),
+      ~ as.integer(. >= median(.[. != 0]))
+    ))
+  
+
+  # Columns to exclude from casting to factors
+  exclude_cols <- c('ERStatus',"yearsToStatus", "DeathBreast")
+  
+  df <- df %>% dplyr::select(where(~ !(all(. == 0) || all(. == 1))))
+  
+  # Cast all columns to factors except for specified columns
+  converted_df <- df %>%
+    mutate_at(vars(-one_of(exclude_cols)), as.factor)
+
+  return(converted_df)
+}
+
+
+getNonZeroSamples <- function(df, predictor){
+  samples <- rownames(df %>% filter(get(predictor) != 0))
+  
+  return(samples)
+}
+
+
+KMplot <- function(df, predictor, ER= NULL){
+  
+  Dt <- df %>% rename(predictor_column = predictor)
+
+   if(!is.null(ER)) {
+      if(grepl('ositive|\\+', ER)) {
+         Dt <- Dt %>% filter(ERStatus == 'Positive')
+         suffix <- 'ERpos'
+      }else{
+         Dt <- Dt %>% filter(ERStatus == 'Negative')
+         suffix <- 'ERneg'
+      }
+   }
+   else suffix <- 'AllPts'
+   
+   
+  bins = unique(Dt$predictor_column)
+  fit <- survfit(Surv(yearsToStatus, DeathBreast)  ~ predictor_column, data = Dt)
+  
+  if(surv_pvalue(fit,data=Dt)$pval > 0.05){
+    print('not significant')
+  }
+
+      g1 <- ggsurvplot(fit,data=Dt, title = (paste(transformNames(features), collapse = ' & ')), conf.int = FALSE, pval=T, risk.table = T, legend.labs = gsub('0','low',gsub('1','high',DF_binary_subset %>% dplyr::select(categories, numeric_categories) %>% distinct() %>% arrange(numeric_categories) %>% pull(categories),fixed=T),fixed=T), palette = getDiscreteColors(8),ggtheme = theme_minimal() + theme(plot.title = element_text(size=10, hjust = 0.5)))
+      return(g1)
+}
+
+```
+
+
+Plot top from univariate
+```{r}
+DF <- TotalDF %>% dplyr::select(all_of(c('HER2 Status','ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme, shapePredictors, scalePredictors)))
+colnames(DF) <- gsub('+','plus', colnames(DF),fixed=T)
+colnames(DF) <- gsub('-','min', colnames(DF),fixed=T)
+colnames(DF) <- gsub('_','', colnames(DF),fixed=T)
+colnames(DF) <- gsub(' ','', colnames(DF),fixed=T)
+
+# DF <- DF %>% select(c(c('ERStatus','yearsToStatus', 'DeathBreast'),result_top25$term))
+DF_binary <- createBinaryPredictorWithMedian(DF)
+
+features <- result_top25 %>% slice_min(adjusted_p,n=1) %>% pull(term)
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(1,max(numeric_categories)))
+
+pdf(here('output/final_figures/Fig4.4/KM1a.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+features <- c('scaleEndothelialtoFibroblasts')
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(1,max(numeric_categories)))
+
+pdf(here('output/final_figures/Fig4.4/KM1b.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+
+
+features <- top25_ERpos %>% filter(!(term %in% grep('HER2', top25_ERpos$term,value=T,fixed=T))) %>% slice_min(adjusted_p,n=1) %>% pull(term)
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast','ERStatus'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(1,max(numeric_categories)))
+
+pdf(here('output/final_figures/Fig4.4/KM2.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories',ER = '+')
+print(p, newpage = FALSE)
+dev.off()
+```
+
+
+
+endothelial
+endothelials + 2 distance
+Myofibroblasts
+Myofibroblasts + 2 distance
+scale endo fibro and scale fibro endo
+```{r}
+DF <- TotalDF %>% dplyr::select(all_of(c('HER2 Status','ER Status','yearsToStatus', 'DeathBreast', cPh_tumour,cPh_tme, shapePredictors, scalePredictors)))
+colnames(DF) <- gsub('+','plus', colnames(DF),fixed=T)
+colnames(DF) <- gsub('-','min', colnames(DF),fixed=T)
+colnames(DF) <- gsub('_','', colnames(DF),fixed=T)
+colnames(DF) <- gsub(' ','', colnames(DF),fixed=T)
+
+# DF <- DF %>% select(c(c('ERStatus','yearsToStatus', 'DeathBreast'),result_top25$term))
+DF_binary <- createBinaryPredictorWithMedian(DF)
+
+features <- c("Endothelial")
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(1,max(numeric_categories)))
+
+pdf(here('output/final_figures/Fig4.4/KM2.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+features <- c('shapeEndothelialtoKi67pluscells', "scaleEndothelialtoFibroblasts",'scaleEndothelialtoEndothelial')
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset
+pdf(here('output/final_figures/Fig4.4/KM3.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+
+features <- c("Myofibroblasts")
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+# DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(1,max(numeric_categories)))
+
+pdf(here('output/final_figures/Fig4.4/KM3.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+
+features <- c('Myofibroblasts','scaleMyofibroblaststoFibroblasts','scaleMyofibroblaststoCD4pluscellsAPCs')
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+DF_binary_subset <- DF_binary_subset %>% filter(numeric_categories %in% c(2,3,6,7))
+
+pdf(here('output/final_figures/Fig4.4/KM4.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+features <- c('scaleFibroblaststoEndothelial', 'scaleEndothelialtoFibroblasts')
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+
+pdf(here('output/final_figures/Fig4.4/KM5.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+features <- c('scaleFibroblaststoEndothelial', 'shapeFibroblaststoEndothelial')
+DF_binary_subset <- DF_binary %>% dplyr::select(c( c('yearsToStatus', 'DeathBreast'),features))
+
+DF_binary_subset <- DF_binary_subset %>% unite('categories',features[[1]]:features[[length(features)]], sep='_',remove =F)
+DF_binary_subset$numeric_categories <- as.numeric(factor(DF_binary_subset$categories))
+
+
+pdf(here('output/final_figures/Fig4.4/KM6.pdf'))
+p <- KMplot(DF_binary_subset,'numeric_categories')
+print(p, newpage = FALSE)
+dev.off()
+
+
+
+features <- setdiff(colnames(DF_binary),c('HER2Status','ERStatus','yearsToStatus', 'DeathBreast','shapeCKminMHCpluscellstoCKplusERorHER2mincells'))
+
+for (f in features){
+  print(f)
+  if (grepl('shape|scale',f)){
+      df_subset <- DF_binary %>% filter(rownames(DF_binary) %in% getNonZeroSamples(DF, f))
+  }else{
+    df_subset <- DF_binary
+  }
+  
+  print(KMplot(df_subset,f))
+}
+```
+

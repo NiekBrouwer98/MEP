@@ -1,0 +1,425 @@
+---
+title: "alternative_clustering"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Alternative clustering
+
+The logistic regression experiments have shown that it is often difficult to separate PAM50 subtypes based on density and distance features.
+There is too much heterogeneity within the PAM50 groups. In this document we are going to explore this heterogeneity and aim to find subclusters in the PAM50 subtypes and cohort-wide.
+
+
+```{r}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here("figure_styling.R"))
+library(ggpubr)
+library(rstatix)
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(factoextra)
+library(plotly)
+library(cluster)
+library(dendextend)
+library(M3C)
+library(umap)
+
+set.seed(123)
+
+```
+
+```{r}
+clinical_data <- getClinical()
+
+originalDensity_features <- getCellProportionsPerImage()%>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(originalDensity_features) <- gsub("_CPh", "", colnames(originalDensity_features))
+# colnames(originalDensity_features) <- gsub("[^A-Za-z0-9+\\-]", "", colnames(originalDensity_features))
+colnames(originalDensity_features) <- paste0(colnames(originalDensity_features), '_originalType')
+
+originalDensityFeatureNames <- setdiff(colnames(originalDensity_features),'ImageNumber_originalType')
+
+density_features <- getCellProportionsPerImageAlternative()%>% filter(isTumour == T) %>% dplyr::select(-c(isTumour))
+colnames(density_features) <- gsub("_CPh", "", colnames(density_features))
+isTumourImages <- density_features$ImageNumber
+
+densityFeatureNames <- setdiff(colnames(density_features),'ImageNumber')
+
+shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+colnames(shape_features) <- paste('shape', colnames(shape_features), sep='_')
+scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% density_features$ImageNumber)
+colnames(scale_features) <- paste('scale', colnames(scale_features), sep='_')
+shape_features <- generate_matrix(shape_features,'shape_tnumber')
+scale_features <- generate_matrix(scale_features,'scale_tnumber')
+
+density_features <- generate_matrix(density_features,'ImageNumber') %>%  rename_at(.vars = vars(ends_with("_CPh")), .funs = funs(sub("[_]CPh$", "", .)))
+originalDensity_features <- generate_matrix(originalDensity_features, 'ImageNumber_originalType')
+
+all_features <- merge(shape_features, scale_features, by='row.names')
+all_features <- merge(all_features, density_features, by.x='Row.names', by.y='row.names')
+all_features <- merge(all_features, originalDensity_features, by.x='Row.names', by.y='row.names')
+rownames(all_features) <- all_features$Row.names
+all_features <- all_features %>% dplyr::select(-c('Row.names'))
+
+significant_features <- readRDS(here('scratch/significantFeatures.rds'))
+
+# rownames(density_features) <- density_features$ImageNumber
+# density_features <- as.data.frame(density_features %>% dplyr::select(-c(ImageNumber)) %>% 
+  # rename_at(.vars = vars(ends_with("_CPh")),
+  #           .funs = funs(sub("[_]CPh$", "", .))) )
+
+cell_labels <- alternativeCellTypeLabels()
+```
+
+```{r}
+gap_statistic <- function(subtype,density_features,distance_features){
+
+  density_df <- density_features %>% dplyr::select(all_of(density_features))
+  shape_df <- shape_features %>% dplyr::select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_features %>% dplyr::select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  df <- df %>% dplyr::select(-c('Row.names'))
+  
+  gap_stat <- clusGap(df, FUN = kmeans, nstart = 25,K.max = 10, B = 10)
+  print(gap_stat, method = "firstmax")
+  print(fviz_gap_stat(gap_stat))
+
+}
+
+
+kmeans_clustering <- function(subtype,density_features,distance_features,cluster_n){
+  if (subtype == 'ALL'){
+      imgs <- intersect(clinical_data %>% pull(ImageNumber), containsTumour %>% filter(isTumour == T)  %>% pull(ImageNumber))
+      name = 'ALL'
+  }else{
+      imgs <- intersect(clinical_data %>% filter(PAM50 == subtype) %>% pull(ImageNumber), containsTumour %>% pull(ImageNumber))
+      name = subtype
+  }
+  
+  density_df <- density_features %>% filter(row.names(density_features) %in% imgs) %>% dplyr::select(all_of(density_features))
+  shape_df <- shape_features %>% filter(row.names(shape_features) %in% imgs) %>% dplyr::select(all_of(distance_features))%>% rename_with( ~ paste0("shape_", .x))
+  scale_df <- scale_features %>% filter(row.names(scale_features) %in% imgs) %>% dplyr::select(all_of(distance_features)) %>% rename_with( ~ paste0("scale_", .x))
+  dist_df <- cbind(shape_df, scale_df)
+
+  df <- merge(density_df, dist_df , by='row.names')
+  row_ha = rowAnnotation(subtype = merge(df %>% dplyr::select('Row.names'), clinical_data %>% dplyr::select('ImageNumber', 'PAM50'), by.x='Row.names', by.y='ImageNumber', all.x=T) %>% pull(PAM50), col = list(subtype = c("Basal" = "yellow", "HER2" = "green", "Luminal A" = "purple", 'Luminal B' = 'pink', 'Normal-like' = 'grey')
+    ))
+
+  df <- df %>% dplyr::select(-c('Row.names'))
+
+  km.res <- kmeans(df, cluster_n , nstart = 25)
+  print(fviz_cluster(km.res, df, ellipse.type = "norm"))
+
+  p <- Heatmap(name = name, as.matrix(df), cluster_columns = T, column_names_gp = gpar(fontsize=2), row_split = km.res$cluster, right_annotation = row_ha)
+  save_pdf(p, paste(here('output/Alternative_clustering/'), name, 'ClustersHM.pdf',sep=''))
+
+  return(km.res)
+  
+}
+
+hierarchical_clustering <- function(df, subtype,cluster_n, name,cell_labels, legend,title){
+  
+  # dend = as.dendrogram(hclust(dist(as.matrix(df))))
+  # dend = color_branches(dend, k = cluster_n)
+  # dist_mat <- dist(df, method = 'euclidean')
+  # hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+  # 
+  # cut_avg <- cutree(hclust_avg, k = cluster_n)
+  # 
+  # avg_dend_obj <- as.dendrogram(hclust_avg)
+  # avg_col_dend <- color_branches(avg_dend_obj, k = cluster_n)
+  # plot(avg_col_dend)
+  
+  # df <- df[, colMeans(df == 0) <= 0.5] #Do we include all features or only the feature in a significant part of the population?
+
+  colnames(df) <- gsub('_originalType', '', colnames(df))
+
+  colnames(df) <- c(merge( tibble(name = colnames(df)), cell_labels, by='name',sort=F) %>% pull(conversion))
+
+  
+  p <- Heatmap(name = 'normalized \n fractions', as.matrix(df), cluster_columns = T,cluster_rows=T, column_names_gp = gpar(fontsize=8), row_names_gp = gpar(fontsize=0), row_km=cluster_n, col = heatmapColorScale(-1.5,4),border =T, row_dend_side = "left", column_labels = sapply(colnames(df), latex2exp::TeX),show_heatmap_legend = legend,column_title = title)
+  
+  return(p)
+  # save_pdf(p, paste(here('output/Method_comparison/heatmaps/'), gsub('+','plus', name,fixed=T), 'HCHM.pdf',sep=''), width=8,height=8)
+  
+}
+
+```
+
+
+## Within Subtype clustering
+Patients of clinical subtypes show large heterogeneity in distance and density features. We aim to split these subtypes further to identify subpopulations.
+
+```{r}
+getFeatures <- function(subtype,type){
+
+  subset <- apply(significant_features[,2:ncol(significant_features)], 1, function(x)which(x>0))
+  type_subset <- names(subset[[subtype]])
+
+  distance_features <- c(grep('shape', type_subset, fixed = T, value = T),grep('scale', type_subset, fixed = T, value = T) )
+  
+
+  if (type == 'originalDensity'){
+    return(originalDensityFeatureNames)
+  }
+  if (type == 'density'){
+    return(densityFeatureNames)
+  }
+  
+  if (type == 'distance'){
+    return(distance_features)
+  }
+  else{
+      return(NULL)
+  }
+  
+}
+
+
+consensus_test <- function(df){
+  test <- M3C(data.frame(t(df)))
+  return(test)
+}
+
+```
+
+Plot original density, density and distance separately.
+
+```{r}
+# subtype_list <- setdiff(unique(clinical_data %>% pull(ER_HER2_status)), NA)
+# optimal_cluster <- c(1,1,1,1)
+# 
+# for (t in c('originalDensity','density','distance')){
+#   for (s in 1:length(subtype_list)){
+#     df <- all_features %>% dplyr::select(getFeatures(subtype_list[[s]], t))
+#     df <- df %>% filter(row.names(df) %in% (clinical_data %>% filter(PAM50 == subtype_list[[s]]  | ER_HER2_status == subtype_list[[s]]) %>% pull(ImageNumber) ))
+#     print(ncol(df))
+#     print(nrow(df))
+#     
+#     hierarchical_clustering(df, subtype_list[[s]], optimal_cluster[[s]], paste(subtype_list[[s]],t))
+#     
+#   }
+#   
+# }
+```
+
+
+
+```{r}
+subtype_list <- setdiff(unique(clinical_data %>% pull(PAM50)), NA)
+
+
+# for (t in c('originalDensity','density')){
+#   for (s in seq(1,5)){
+#     df <- all_features %>% dplyr::select(all_of(getFeatures(subtype_list[[s]], t)))
+#     df <- df %>% filter(row.names(df) %in% (clinical_data %>% filter(PAM50 == subtype_list[[s]]) %>% pull(ImageNumber) ))
+#     print(ncol(df))
+#     print(nrow(df))
+#     
+#     (consensus_test(df))
+#   }
+# }
+
+optimal_cluster <- tibble(originalDensity = c(2,7,2,2,2), density = c(2,2,2,8,2))
+for (s in seq(1,5)){
+    df <- all_features %>% dplyr::select(getFeatures(subtype_list[[s]], 'originalDensity'))
+    df <- df %>% filter(row.names(df) %in% (clinical_data %>% filter(PAM50 == subtype_list[[s]]) %>% pull(ImageNumber) ))
+    hm1 <- hierarchical_clustering(df, subtype_list[[s]], (optimal_cluster %>% pull(originalDensity))[[s]], paste(subtype_list[[s]],t,sep=''),originalCellTypeLabels(), F,title='A                                                                                                                                             ')
+    # save_pdf(hm1, paste(here('output/final_figures/Fig4.2/clustered_originalDensityHM'),subtype_list[[s]],'.pdf',sep=''))
+    
+    df <- all_features %>% dplyr::select(getFeatures(subtype_list[[s]], 'density'))
+    df <- df %>% filter(row.names(df) %in% (clinical_data %>% filter(PAM50 == subtype_list[[s]]) %>% pull(ImageNumber) ))
+    hm2 <- hierarchical_clustering(df, subtype_list[[s]], (optimal_cluster %>% pull(density))[[s]], paste(subtype_list[[s]],t,sep=''),alternativeCellTypeLabels(),T,title = 'B                                                                         ')
+    
+    pdf( paste(here('output/final_figures/Fig4.2/clustered_DensityHM'),subtype_list[[s]],'.pdf',sep=''),width=12, height=6)
+    hm_total <- hm1 + hm2
+    draw(hm_total)
+    dev.off()
+    # save_pdf(hm_total, paste(here('output/final_figures/Fig4.2/clustered_DensityHM'),subtype_list[[s]],'.pdf',sep=''))
+
+      }
+  
+
+```
+
+
+## Cohort-wide clustering
+
+Show all density features
+
+```{r}
+
+# distance_names <- grep('shape|scale', colnames(all_features), value = T)
+# originalDensity_names <- grep('originalType', colnames(all_features),fixed=T, value = T)
+# density_names <- setdiff(colnames(all_features), c(distance_names, originalDensity_names))
+# 
+# df <- all_features %>% dplyr::select(c(originalDensity_names))
+# annotations <- merge(tibble(row_names = rownames(df)), clinical_data %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)), by.x='row_names', by.y='ImageNumber', all.x=T)
+# oneHotPAM <- reshape2::dcast(data = annotations, row_names ~ PAM50, length)
+# oneHotMS <- reshape2::dcast(data = annotations, row_names ~ ER_HER2_status, length)
+# 
+# # consensus_test(df)
+
+```
+
+
+```{r}
+# optimal_cluster <- c(10)
+# 
+# colorPanel = carto_pal(9, "Safe")
+# 
+# column_ha = HeatmapAnnotation(pam50 = annotations %>% pull(PAM50), ER_HER2 = annotations %>% pull(ER_HER2_status),col = list(pam = c('Basal' = carto_pal(5, "Safe")[[1]] ,'HER2' = carto_pal(5, "Safe")[[2]],'Luminal A' =carto_pal(5, "Safe")[[3]],'Luminal B' = carto_pal(5, "Safe")[[4]],'Normal-like' = carto_pal(5, "Safe")[[5]]), ER_HER2 = c('ER-HER2-' = carto_pal(4, "Safe")[[1]],'ER-HER2+' = carto_pal(4, "Safe")[[2]],'ER+HER2-' = carto_pal(4, "Safe")[[3]],'ER+HER2+' = carto_pal(4, "Safe")[[4]])))
+# 
+# column_ha = HeatmapAnnotation(Basal = oneHotPAM %>% pull(Basal), HER2 = oneHotPAM %>% pull(HER2), LumA = oneHotPAM %>% pull(`Luminal A`),LumB = oneHotPAM %>% pull(`Luminal B`),Normal = oneHotPAM %>% pull(`Normal-like`), 
+#                               col = list(Basal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          HER2 = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumA = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumB = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          Normal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]])))
+# 
+# 
+# dist_mat <- dist(df, method = 'euclidean')
+# hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+# 
+# cut_avg <- cutree(hclust_avg, k = optimal_cluster[[1]])
+# 
+# avg_dend_obj <- as.dendrogram(hclust_avg)
+# avg_col_dend <- color_branches(avg_dend_obj, k = optimal_cluster[[1]])
+# plot(avg_col_dend)
+# 
+# colnames(df) <- gsub('_originalType', '', colnames(df), fixed=T)
+# 
+# p <- Heatmap(name = 'ALL', t(as.matrix(df)), cluster_columns = T,cluster_rows=T, column_names_gp = gpar(fontsize=2), row_names_gp = gpar(fontsize=8), column_split = cut_avg, top_annotation = column_ha, col=heatmapColorScale(-4,4))
+# save_pdf(p, here('output/Alternative_clustering/orginalDensity_ALLHM.pdf'),width=12,height=8)
+
+
+```
+
+
+```{r}
+# df <- all_features %>% dplyr::select(c(density_names))
+# annotations <- merge(tibble(row_names = rownames(df)), clinical_data %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)), by.x='row_names', by.y='ImageNumber', all.x=T)
+# oneHotPAM <- reshape2::dcast(data = annotations, row_names ~ PAM50, length)
+# oneHotMS <- reshape2::dcast(data = annotations, row_names ~ ER_HER2_status, length)
+# 
+# # consensus_test(df)
+
+```
+
+
+```{r}
+# optimal_cluster <- c(10)
+# 
+# colorPanel = carto_pal(9, "Safe")
+# 
+# column_ha = HeatmapAnnotation(pam50 = annotations %>% pull(PAM50), ER_HER2 = annotations %>% pull(ER_HER2_status),col = list(pam = c('Basal' = carto_pal(5, "Safe")[[1]] ,'HER2' = carto_pal(5, "Safe")[[2]],'Luminal A' =carto_pal(5, "Safe")[[3]],'Luminal B' = carto_pal(5, "Safe")[[4]],'Normal-like' = carto_pal(5, "Safe")[[5]]), ER_HER2 = c('ER-HER2-' = carto_pal(4, "Safe")[[1]],'ER-HER2+' = carto_pal(4, "Safe")[[2]],'ER+HER2-' = carto_pal(4, "Safe")[[3]],'ER+HER2+' = carto_pal(4, "Safe")[[4]])))
+# 
+# column_ha = HeatmapAnnotation(Basal = oneHotPAM %>% pull(Basal), HER2 = oneHotPAM %>% pull(HER2), LumA = oneHotPAM %>% pull(`Luminal A`),LumB = oneHotPAM %>% pull(`Luminal B`),Normal = oneHotPAM %>% pull(`Normal-like`), 
+#                               col = list(Basal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          HER2 = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumA = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumB = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          Normal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]])))
+# 
+# 
+# dist_mat <- dist(df, method = 'euclidean')
+# hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+# 
+# cut_avg <- cutree(hclust_avg, k = optimal_cluster[[1]])
+# 
+# avg_dend_obj <- as.dendrogram(hclust_avg)
+# avg_col_dend <- color_branches(avg_dend_obj, k = optimal_cluster[[1]])
+# plot(avg_col_dend)
+# 
+# colnames(df) <- gsub('_originalType', '', colnames(df), fixed=T)
+# 
+# p <- Heatmap(name = 'ALL', t(as.matrix(df)), cluster_columns = T,cluster_rows=T, column_names_gp = gpar(fontsize=2), row_names_gp = gpar(fontsize=10), column_split = cut_avg, top_annotation = column_ha, col=heatmapColorScale(-4,4))
+# save_pdf(p, here('output/Alternative_clustering/density_ALLHM.pdf'),width=12,height=8)
+
+
+```
+
+
+Select features with most variance among samples.
+
+```{r}
+# shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% isTumourImages)
+# 
+# na_count <-sapply(shape_features, function(y) sum(length(which(is.na(y)))))
+# 
+# na_count <- data.frame(na_count)
+# na_count$feature <- row.names(na_count)
+# na_count <- na_count %>% arrange(desc(na_count)) %>% tibble::rowid_to_column("rank") %>% mutate(percentage = (100*as.numeric(rank)/225))
+# 
+# feature_selection <- na_count %>% filter(percentage > 80) %>% pull(feature)
+# 
+# shape_features <- getShapeFeaturesAlternative() %>% filter(tnumber %in% isTumourImages) %>% dplyr::select(c(feature_selection))
+# colnames(shape_features) <- paste('shape', colnames(shape_features), sep='_')
+# scale_features <- getScaleFeaturesAlternative() %>% filter(tnumber %in% isTumourImages) %>% dplyr::select(c(feature_selection))
+# colnames(scale_features) <- paste('scale', colnames(scale_features), sep='_')
+# 
+# shape_features <- generate_matrix(shape_features,'shape_tnumber')
+# scale_features <- generate_matrix(scale_features,'scale_tnumber')
+# 
+# df <- merge(shape_features, scale_features, by='row.names') %>% dplyr::select(-c('Row.names'))
+# 
+# annotations <- merge(tibble(row_names = rownames(df)), clinical_data %>% dplyr::select(c(ImageNumber, PAM50, ER_HER2_status)), by.x='row_names', by.y='ImageNumber', all.x=T)
+# oneHotPAM <- reshape2::dcast(data = annotations, row_names ~ PAM50, length)
+# oneHotMS <- reshape2::dcast(data = annotations, row_names ~ ER_HER2_status, length)
+# 
+# # consensus_test(df)
+
+```
+
+```{r}
+# optimal_cluster <- c(10)
+# 
+# column_ha = HeatmapAnnotation(pam50 = annotations %>% pull(PAM50), ER_HER2 = annotations %>% pull(ER_HER2_status),col = list(pam = c('Basal' = carto_pal(5, "Safe")[[1]] ,'HER2' = carto_pal(5, "Safe")[[2]],'Luminal A' =carto_pal(5, "Safe")[[3]],'Luminal B' = carto_pal(5, "Safe")[[4]],'Normal-like' = carto_pal(5, "Safe")[[5]]), ER_HER2 = c('ER-HER2-' = carto_pal(4, "Safe")[[1]],'ER-HER2+' = carto_pal(4, "Safe")[[2]],'ER+HER2-' = carto_pal(4, "Safe")[[3]],'ER+HER2+' = carto_pal(4, "Safe")[[4]])))
+# 
+# column_ha = HeatmapAnnotation(Basal = oneHotPAM %>% pull(Basal), HER2 = oneHotPAM %>% pull(HER2), LumA = oneHotPAM %>% pull(`Luminal A`),LumB = oneHotPAM %>% pull(`Luminal B`),Normal = oneHotPAM %>% pull(`Normal-like`), 
+#                               col = list(Basal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          HER2 = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumA = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          LumB = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]] ),
+#                                          Normal = c('1' = carto_pal(2, 'Safe')[[1]],'0' = carto_pal(2, 'Safe')[[2]])))
+# 
+# 
+# dist_mat <- dist(df, method = 'euclidean')
+# hclust_avg <- hclust(dist_mat, method = 'ward.D2')
+# 
+# cut_avg <- cutree(hclust_avg, k = optimal_cluster[[1]])
+# clusters <- tibble(ImageNumber = rownames(df), cluster = cut_avg)
+# saveRDS(clusters, here('scratch/alternativeClusters.rds'))
+# 
+# avg_dend_obj <- as.dendrogram(hclust_avg)
+# avg_col_dend <- color_branches(avg_dend_obj, k = optimal_cluster[[1]])
+# plot(avg_col_dend)
+# 
+# p <- Heatmap(name = 'ALL', t(as.matrix(df)), cluster_columns = T,cluster_rows=T, column_names_gp = gpar(fontsize=2), row_names_gp = gpar(fontsize=4), column_split = cut_avg, top_annotation = column_ha, col=heatmapColorScale(-4,4))
+# save_pdf(p, here('output/Alternative_clustering/distance_ALLHM.pdf'),width=12,height=8)
+
+```
+
+```{r}
+# allParameters <- getALLParametersAlternative()
+# cluster1 <- clusters %>% filter(cluster == 1) %>% pull(ImageNumber)
+# allParameters <- merge(allParameters, clusters, by.x='tnumber', by.y='ImageNumber')
+# 
+# ggplot() +
+#   geom_point(data = allParameters, aes(x=shape, y=scale), alpha=0.1, size=0.5) + facet_wrap(~cluster,ncol = 5) +
+#   theme_bw() +
+#   ylim(10,300) + xlim(0,6) +
+#   scale_y_log10() +
+#   xlab('Shape') + ylab('Scale')
+# 
+# ggsave(here('output/Alternative_clustering/Clusters_parameterSpaces.png'),width = 15,height=6)
+```
+
+

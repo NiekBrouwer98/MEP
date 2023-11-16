@@ -1,0 +1,234 @@
+---
+title: "presentation_figures"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## cell types
+
+```{r, include=FALSE}
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(fst)
+library(data.table)
+library(cowplot)
+
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here("figure_styling.R"))
+```
+
+```{r, include=FALSE}
+outdir <- here('output/final_figures/Fig4.2/')
+
+cells_original <- getCells()
+cells <- getCellsAlternative()
+cell_counts <- getCellCounts(cells)
+clinical_data <- getClinical()
+
+projectPanel <- getPanel()
+
+cell_labels <- alternativeCellTypeLabels()
+cell_labels_original <- originalCellTypeLabels()
+
+cell_densities <- getCellProportionsPerImageAlternative()
+cell_densities_original <- getCellProportionsPerImage()
+
+```
+
+```{r}
+clinical_data <- getClinical()
+```
+
+
+```{r}
+show_slide <- function(sample_number, highlight_A, highlight_B){
+  cells <- getCellsAlternative()
+  cells <- cells %>% filter(meta_description %in% unique(cells$meta_description)[1:10])
+  slide_1 <- ggplot(data=cells%>% filter(ImageNumber == sample_number) %>% mutate(type = ifelse(meta_description %in% highlight_A, 'highlighted', ifelse(meta_description == highlight_B, 'highlight B', 'other')))) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=type), alpha =1) +
+    theme_bw() + ggtitle(paste('imagenumber: ', sample_number)) + theme(legend.position = "none")+ scale_color_manual(values = getDiscreteColors(3))
+  
+  slide_2 <- ggplot(data=cells%>% filter(ImageNumber == sample_number)) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =1) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample_number)) + scale_color_manual(values = getDiscreteColors(10)) + theme(legend.position = "none")  + xlab('') + ylab('') +
+  theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank(), #remove x axis ticks
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank()  #remove y axis ticks
+        ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  
+  return(plot_grid(slide_1, slide_2, n_col=2))
+}
+
+
+show_slide(3,  "CD4+_cells_APCs", "CD8+_cells")
+ggsave(here('output/PresentationFigures/slide.pdf'),width =8, height=8)
+```
+```{r}
+show_slide <- function(sample_number, highlight_A, highlight_B){
+  cells <- getCellsAlternative()
+  cells <- cells %>% filter(meta_description %in% c(highlight_A, highlight_B))
+  slide_1 <- ggplot(data=cells%>% filter(ImageNumber == sample_number) %>% mutate(type = ifelse(meta_description %in% highlight_A, 'highlighted', ifelse(meta_description == highlight_B, 'highlight B', 'other')))) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=type), alpha =1,size=2) +
+    theme_bw() + scale_color_manual(values = c(getDiscreteColors(3)[1:2])) +  theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank(), #remove x axis ticks
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank()  #remove y axis ticks
+        ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  + theme(legend.position = "none")  + xlab('') + ylab('')
+
+  
+  # slide_2 <- ggplot(data=cells%>% filter(ImageNumber == sample_number)) + 
+  #   geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =1) + 
+  #   theme_bw() + ggtitle(paste('imagenumber: ', sample_number)) + scale_color_manual(values = getDiscreteColors(10)) + theme(legend.position = "none")  + xlab('') + ylab('') +
+  # theme(axis.text.x=element_blank(), #remove x axis labels
+  #       axis.ticks.x=element_blank(), #remove x axis ticks
+  #       axis.text.y=element_blank(),  #remove y axis labels
+  #       axis.ticks.y=element_blank()  #remove y axis ticks
+  #       ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  
+  # return(plot_grid(slide_1, slide_2, n_col=2))
+  return(slide_1)
+}
+
+basal <- clinical_data %>% filter(PAM50 == 'Basal') %>% pull(ImageNumber)
+LumA <- clinical_data %>% filter(PAM50 == 'Luminal A') %>% pull(ImageNumber)
+
+basalImages <- cellCombinationCountsAlt %>% filter(tnumber %in% basal) %>% filter(phenotype_combo == "Ki67+_cells_epithelial_to_Granulocytes_Macrophages") %>% filter(n_from > 100 & n_to > 100) %>% pull(tnumber)
+LumAImages <- cellCombinationCountsAlt %>% filter(tnumber %in% LumA) %>% filter(phenotype_combo == "Ki67+_cells_epithelial_to_Granulocytes_Macrophages") %>% filter(n_from > 20 & n_to > 20) %>% filter(n_from > 30 & n_to < 30) %>% pull(tnumber)
+
+
+show_distance_distribution(cells, all_distances_dataAlt, all_parametersAlt %>% filter(tnumber ==basalImages[1]) %>% filter(phenotype_combo == "Ki67+_cells_epithelial_to_Granulocytes_Macrophages"),color = getDiscreteColors(3)[[1]], ylimit = 0.04)
+ggsave(here('output/PresentationFigures/abundantcells.png'),width=10,height=4)
+
+
+show_distance_distribution(cells, all_distances_dataAlt, all_parametersAlt %>% filter(tnumber == LumAImages[3]) %>% filter(phenotype_combo == "Ki67+_cells_epithelial_to_Granulocytes_Macrophages"),color = getDiscreteColors(3)[[2]], ylimit = 0.04)
+ggsave(here('output/PresentationFigures/rarecells.png'),width=10,height=4)
+
+cells <- getCellsAlternative()
+cells_subset <- rbind(cells %>% filter(ImageNumber==basalImages[1]) %>% filter(meta_description %in% c('Ki67+_cells_epithelial')),cells %>% filter(ImageNumber ==LumAImages[3]) %>% filter(meta_description %in% c('Granulocytes_Macrophages'))%>% mutate(Location_Center_X = Location_Center_X - 300)%>% mutate(Location_Center_Y = Location_Center_Y - 100) %>% mutate(Location_Center_X = ifelse(Location_Center_X < 0, Location_Center_X +400, Location_Center_X )))
+ 
+slide_1 <- ggplot(data=cells_subset) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =1,size=2) +
+  theme_bw() + scale_color_manual(values = c(getDiscreteColors(3)[2],getDiscreteColors(3)[1])) +  theme(axis.text.x=element_blank(), #remove x axis labels
+      axis.ticks.x=element_blank(), #remove x axis ticks
+      axis.text.y=element_blank(),  #remove y axis labels
+      axis.ticks.y=element_blank()  #remove y axis ticks
+      ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  + theme(legend.position = "none")  + xlab('') + ylab('')
+ggsave(here('output/PresentationFigures/rarecellsSlide.png'),width=4,height=4)
+
+cells_subset <- rbind(cells %>% filter(ImageNumber==basalImages[1]) %>% filter(meta_description %in% c('Ki67+_cells_epithelial')),cells %>% filter(ImageNumber ==basalImages[1]) %>% filter(meta_description %in% c('Granulocytes_Macrophages')))
+slide_1 <- ggplot(data=cells_subset) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =1,size=2) +
+  theme_bw() + scale_color_manual(values = c(getDiscreteColors(3)[2],getDiscreteColors(3)[1])) +  theme(axis.text.x=element_blank(), #remove x axis labels
+      axis.ticks.x=element_blank(), #remove x axis ticks
+      axis.text.y=element_blank(),  #remove y axis labels
+      axis.ticks.y=element_blank()  #remove y axis ticks
+      ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  + theme(legend.position = "none")  + xlab('') + ylab('')
+ggsave(here('output/PresentationFigures/abundantcellsSlide.png'),width=4,height=4)
+
+
+```
+
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+
+median_fractions <- median_fractions %>% dplyr::select(c('PAM50','Basal','HER2+_cells','Ki67+_cells_epithelial',grep('CK',colnames(median_fractions), value = T, fixed=T)))
+
+median_fractions <- median_fractions[,c("PAM50" ,"CK+_ER+_cells","CK+_ER-_cells","CKmed_ERorHER2-_cells" , "CK-_cells", "CK-MHC+_cells" ,"HER2+_cells","Basal", "Ki67+_cells_epithelial")]
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+median_fractions2 <- median_fractions[,c(8)]
+
+# hm1 <- Heatmap(median_fractions,name = 'normalized \n median fractions',cluster_columns = T,cluster_rows=F,column_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(-2,2),show_heatmap_legend = F,top_annotation = HeatmapAnnotation(phenotypes = anno_block(gp = gpar(fill =c('black')), labels = c("Alternative cell types"),labels_gp = gpar(fontsize = 12,col='white'))))
+median_fractions <- median_fractions[,c(1,2,4,5,6,7)]
+colnames(median_fractions) <- c('Cancer cells with  \n estrogen hormone receptor','Cancer cells without \n  hormone receptors', 'Normal epithelial cells','Cancer cells with \n MHC-proteins', 'Cancer cells with \n HER2 protein', 'Basal cancer cells')
+
+hm1 <- Heatmap(t(median_fractions),name = 'normalized \n median fractions',cluster_columns = F,cluster_rows=F,col = heatmapColorScale(-2,2),show_heatmap_legend = F,column_title='Tumor subtype',row_title='Cell type',column_title_gp = grid::gpar(fontsize = 16),row_title_gp = grid::gpar(fontsize = 16),
+  column_names_gp = grid::gpar(fontsize = 14),
+  row_names_gp = grid::gpar(fontsize = 14))
+
+save_pdf(hm1, here('output/PresentationFigures/tumorcelltypesHM.pdf'),width=10)
+
+```
+
+```{r}
+cell_densities_withsubtypes <- merge(cell_densities, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")),by="ImageNumber") %>% filter(!is.na(PAM50)) %>% filter(isTumour == T)
+cell_densities_withsubtypes <- replace(cell_densities_withsubtypes,is.na(cell_densities_withsubtypes),0)
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('isTumour'))
+rownames(cell_densities_withsubtypes) <- cell_densities_withsubtypes$ImageNumber
+cell_densities_withsubtypes <- cell_densities_withsubtypes %>% dplyr::select(-c('ImageNumber'))
+
+median_fractions <- cell_densities_withsubtypes %>% group_by(PAM50) %>% summarise_at(vars(setdiff(colnames(cell_densities_withsubtypes), 'PAM50')), median)
+
+colnames(median_fractions) <- gsub('_CPh', '', colnames(median_fractions), fixed=T)
+
+median_fractions <- median_fractions %>% dplyr::select(-c('Basal','HER2+_cells','Ki67+_cells_epithelial',grep('CK',colnames(median_fractions), value = T, fixed=T)))
+
+median_fractions <- median_fractions[,c('PAM50', "Endothelial","Fibroblasts","Myofibroblasts","Granulocytes_Macrophages","Ki67+_cells_TME","B cells","CD4+_cells_APCs","CD8+_cells","CD57+_cells","CD38+_cells")]
+
+colnames(median_fractions) <- c('PAM50',merge( tibble(name = colnames(median_fractions)), cell_labels, by='name',sort=F) %>% pull(conversion))
+
+rownames <- median_fractions$PAM50
+median_fractions <- median_fractions %>% dplyr::select(-c('PAM50'))
+
+median_fractions <- scale(median_fractions)
+rownames(median_fractions) <- rownames
+median_fractions <- replace(median_fractions,is.na(median_fractions),0)
+
+
+median_fractions <- median_fractions[,c(1,2,3,4,6,7,8)]
+median_fractions <- cbind(median_fractions, median_fractions2)
+colnames(median_fractions)[[4]] <- 'Granulocytes & \n Macrophages'
+colnames(median_fractions)[[6]] <- "$CD4^{+}$ $cells$ $$&$$ $APCs$"
+colnames(median_fractions)[[8]] <- 'Proliferating cells'
+
+
+hm2 <- Heatmap(t(median_fractions),name = 'normalized \n median fractions',cluster_columns = F,cluster_rows=F,row_labels = sapply(colnames(median_fractions), latex2exp::TeX),col = heatmapColorScale(-2,2),show_heatmap_legend = F,column_title='Tumor subtype',row_title='Cell type',column_title_gp = grid::gpar(fontsize = 16),row_title_gp = grid::gpar(fontsize = 16),
+  column_names_gp = grid::gpar(fontsize = 14),
+  row_names_gp = grid::gpar(fontsize = 14))
+
+save_pdf(hm2, here('output/PresentationFigures/OthercelltypesHM.pdf'),width=10,height=8)
+
+
+print(hm2)
+
+```
+
+
+```{r}
+prediction_performances <- tibble(subtype = c('Basal', 'HER2-enriched', 'Luminal A', 'Luminal B', 'Normal-like'), 
+       `Tumor cell fractions` = c(0.79, 0.79, 0.70, 0.60, 0.47),
+       `TME cell fractions` = c(0.69,0.61,0.69,0.52,0.55),
+       `Spatial relationships` = c(0.73, 0.63, 0.63,0.51, 0.54))
+
+prediction_performances <- melt(prediction_performances) %>% mutate(sd = c(0.03,0.04,0.04,0.07,0.03,0.11,0.03,0.02,0.05,0.07,0.12,0.13,0.03,0.04,0.05))
+
+ggplot(prediction_performances,aes(y=reorder(subtype, desc(subtype)), x=value, fill=variable)) + geom_bar(,stat='identity', position='dodge')+ geom_errorbar( aes(xmin=value-sd, xmax=value+sd), alpha=0.9, width=.35,position=position_dodge(.9)) +
+ ylab('Tumor subtype')  + xlab('ROCAUC') + theme_bw() + scale_fill_manual(name='',values = getDiscreteColors(4)[1:3]) + scale_x_continuous(breaks=seq(0.0, 1, 0.1))+theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=14))
+
+ggsave(here('output/PresentationFigures/performances.png'),width=10,height=8)
+```
+

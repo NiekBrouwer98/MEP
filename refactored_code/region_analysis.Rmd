@@ -1,0 +1,499 @@
+---
+title: "region_analysis"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Region analysis
+In this document we are going to investigate the following hypothesis:
+
+What are common spatial arrangements in structure-dense slide regions such as vascular stroma, granulocyte enriched, APC enriched, and suppressed expansion?
+We first look into these regions because they are associated with an improved (granulocyte enriched, APC enriched, and suppressed expansion) and decreased (vascular stroma) survival in ER+ patients.
+
+```{r,include = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(here)
+library(fst)
+library(data.table)
+source(here("UtilityFunctions.R"))
+source(here('MEP_UtilityFunctions.R'))
+source(here('figure_styling.R'))
+
+library(ComplexHeatmap)
+library(spatstat)
+library(dbscan)
+library(patchwork)
+library(cowplot)
+library(ggpubr)
+library(rstatix)
+library(rlang)
+
+outdir <- here('output/final_figures/regions/')
+
+clinical_data <- getClinical()
+cells <- getCellsAlternative()
+structures <- getStructures()
+structureLabels <- gsub("[^A-Za-z0-9+[:space:]]",'', structures$TME$labels)
+structureLabels <- tibble(index = seq(1,10), label = structureLabels)
+TMEStructures <- read_fst(here('scratch/TMEStructures.fst'), as.data.table=T)
+allCommunities <- read_rds(here('scratch/allCommunities.rds'))
+
+# structure_type <- 'APC enriched'
+# structure_type <- 'Suppressed expansion'
+# structure_type <- 'Granulocyte enriched'
+structure_type <- "TLSlike"
+# structure_type <- "FSP1+ enriched"
+# structure_type <- "PDPN+ active stroma"
+# structure_type <- "CD8+ macrophages"
+# structure_type <- "Active IR"
+# structure_type <- "Active stroma"
+# structure_type <- 'Vascular stroma'
+# 
+
+
+```
+
+```{r}
+allCommunities <- merge(allCommunities, TMEStructures %>% dplyr::select(communityUID, TMEStructure), by='communityUID')
+
+cellsWithoutExpression <- cbind(cells[,1:(ncol(cells)-43)],cells[,(ncol(cells)-3):ncol(cells)])
+cellsWithStructure <- merge(cellsWithoutExpression, allCommunities %>% dplyr::select(-c('to', 'to_meta_id', 'nInteractions')), by.x = c('ImageNumber', 'ObjectNumber'), by.y=c('ImageNumber', 'from'), all=T)
+cellsWithStructure <- cellsWithStructure %>% mutate(TMEStructure = as.numeric(TMEStructure))
+cellsWithStructure <- merge(cellsWithStructure, structureLabels, by.x='TMEStructure', by.y='index',all.x=T) %>% distinct()
+
+```
+
+## KDE separation
+
+Split regions in  images
+
+```{r}
+data_with_assigned_locations <- readRDS(paste(here('scratch/Regions_'),gsub(' ','_',gsub('+', 'plus',structure_type,fixed=T),fixed=T), '.rds', sep=''))
+# data_with_assigned_locations <- data_with_assigned_locations %>% mutate(assigned_loc = ifelse(assigned_loc == 'S', structure_type, 'low-density region'))
+# data_with_assigned_locations <- data_with_assigned_locations %>% mutate(correct_prediction = ifelse(assigned_loc == label, T, F))
+
+data_with_assigned_locations$TMEStructure <- as.character(data_with_assigned_locations$TMEStructure)
+
+show_slideStructures <- function(df, sample_number, column){
+  slide_1 <- ggplot(data=df%>% filter(ImageNumber == sample_number)) + geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=get(column)), alpha =1) +theme_bw() + ggtitle(paste('imagenumber: ', sample_number)) + theme(legend.position = "none") + xlab('') + ylab('') +
+  theme(axis.text.x=element_blank(), #remove x axis labels
+        axis.ticks.x=element_blank(), #remove x axis ticks
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank()  #remove y axis ticks
+        ) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + scale_color_manual(values = c("#888888","white"))
+
+  return(slide_1)
+}
+
+
+show_slideStructures(data_with_assigned_locations, 3, 'label')
+ggsave(here('output/PresentationFigures/slideWithStructures1.pdf'),width =4, height=4)
+show_slideStructures(data_with_assigned_locations, 3, 'label')
+ggsave(here('output/PresentationFigures/slideWithStructures2.pdf'),width =4, height=4)
+show_slideStructures(data_with_assigned_locations, 3, 'TMEStructure')
+ggsave(here('output/PresentationFigures/slideWithStructuresALL.pdf'),width =4, height=4)
+
+
+# for (i in images){
+#   print(plot_grid(show_slideStructures(data_with_assigned_locations,i,'label'),show_slideStructures(data_with_assigned_locations,i,'assigned_loc')))
+#
+# }
+#
+# splittedCells <- data_with_assigned_locations %>% unite('Split_ImageNumber',c(ImageNumber, assigned_loc), sep = '_', remove = F)
+# saveRDS(splittedCells, paste(here('DATA/splittedCells'),'_',gsub(' ', '_',gsub('+', 'plus',structure_type,fixed=T),fixed=T),'.rds', sep=''))
+
+
+```
+
+## Spatial relationship analysis
+
+
+```{r}
+# structure_type <- gsub(' ', '_', structure_type, fixed=T)
+# 
+# 
+# source(here('loadData.R'))
+# 
+# CompileALLParameters_regions <- function(type, save=TRUE){
+#   all_parameters <- get_parameters(paste(here('scratch/success_models_'),type,'/',sep='')) %>%
+#     separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
+#     filter(a > 0.5) %>%
+#     filter(b > 8) %>%
+#     dplyr::rename(shape =a , scale = b) %>%
+#     unite('unique_sample', c(tnumber, phenotype_combo), remove=F)
+# 
+#   if(save){
+#     saveRDS(all_parameters, file = paste(here('scratch/all_parameters_'), type,'.rds',sep=''))
+#   }
+# 
+#   return(all_parameters)
+# 
+# }
+# 
+# CompileALLParameters_regions(gsub('+', 'plus',structure_type,fixed=T))
+# transform_parameters_to_matrix(readRDS(paste(here('scratch/all_parameters_'), gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='')),
+#                                paste(here('scratch/features/regions/shape_parameters_'),gsub('+', 'plus',structure_type,fixed=T), '.rds',sep=''),
+#                                paste(here('scratch/features/regions/scale_parameters_'), gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='') )
+```
+
+```{r}
+structure_type <- gsub(' ', '_', structure_type, fixed=T)
+
+
+allparameters_structure <- readRDS(paste(here('scratch/all_parameters_'), gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='')) %>% separate(tnumber,c('tnumber','region'),sep='_') %>% mutate(region = ifelse((region == 'low' | region == 'low-density region'),'other',paste(gsub('_', ' ', structure_type),'')))  %>% filter(!(tnumber %in% getNonTumourImages()))
+
+
+tumor_celltypes <- grep('CK', unique(cells %>% pull(meta_description)),fixed = T,value=T)
+tme_celltypes <- setdiff( unique(cells %>% pull(meta_description)), tumor_celltypes)
+
+ggplot() + 
+  geom_point(data = allparameters_structure, aes(x=shape, y=scale,colour=region),alpha=0.8, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of structure regions") + 
+  guides(colour = guide_legend(override.aes = list(size=10)))
+
+```
+
+Are some features estimated more in a certain region?
+
+```{r}
+shapeFeatures_structure <- readRDS(paste(here('scratch/features/regions/shape_parameters_'),gsub('+', 'plus',structure_type,fixed=T), '.rds',sep=''))%>% separate(tnumber,c('tnumber','region'),sep='_') %>% mutate(region = ifelse((region == 'low' | region == 'low-density region'),'other',paste(gsub('_', ' ', structure_type),'')))
+scaleFeatures_structure <- readRDS(paste(here('scratch/features/regions/scale_parameters_'), gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='') ) %>% separate(tnumber,c('tnumber','region'),sep='_') %>% mutate(region = ifelse((region == 'low' | region == 'low-density region'),'other',paste(gsub('_', ' ', structure_type),'')))
+
+na_counts <- merge(data.frame(colSums(is.na(shapeFeatures_structure %>% filter(region == paste(gsub('_', ' ', structure_type),''))))),data.frame(colSums(is.na(shapeFeatures_structure %>% filter(region == 'other')))),by='row.names')
+
+colnames(na_counts)[1] <- "feature"
+colnames(na_counts)[2] <- "high"
+colnames(na_counts)[3] <- "low"
+na_counts <- reshape2::melt(na_counts)
+na_counts <- na_counts %>% filter(!(feature %in% c('tnumber', 'region'))) %>% separate(feature, c('phenotype_from', 'phenotype_to'),sep='_to_') 
+# na_counts <- na_counts %>% mutate(value = 100*value/length(unique(shapeFeatures_structure$tnumber)))
+
+ggplot(na_counts %>% filter(variable=='high') %>% filter((phenotype_from %in% tme_celltypes) & (phenotype_to %in% tme_celltypes))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=value)) + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('high density region')
+
+ggplot(na_counts %>% filter(variable=='low' | variable == 'low-density region') %>% filter((phenotype_from %in% tme_celltypes) & (phenotype_to %in% tme_celltypes))) + geom_tile(aes(x=phenotype_from, y=phenotype_to, fill=value)) + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle('low density region')
+
+```
+
+```{r}
+generate_matrix_zeroOneScaling <- function(df, col_rownames ,subselection=NULL, NA_percentage=0, scale_rows=FALSE){
+  m <- as.data.frame(df)
+  rownames(m) <- m[,col_rownames]
+  m <- subset(m,select = -c(get(col_rownames)))
+  
+  # Filtering
+  m <- m[, which(colMeans(!is.na(m)) > NA_percentage)]
+
+  m <- replace(m,is.na(m),0)
+  m <- as.data.frame(m)
+  
+  
+  # Scaling
+  # m <- apply(m, 2, function(x) (x - min(x)) / (max(x) - min(x)))
+  
+  
+  return(m)
+}
+
+shapeFeatures_structure <- generate_matrix_zeroOneScaling(readRDS(paste(here('scratch/features/regions/shape_parameters_'),gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='')), 'tnumber')
+scaleFeatures_structure <- generate_matrix_zeroOneScaling(readRDS(paste(here('scratch/features/regions/scale_parameters_'), gsub('+', 'plus',structure_type,fixed=T), '.rds',sep='')), 'tnumber')
+densityFeatures_structure <- generate_matrix_zeroOneScaling(readRDS(paste(here('scratch/features/regions/cell_proportions_per_image_'), gsub('+', 'plus',structure_type,fixed=T),'.rds',sep='')), 'ImageNumber')
+
+filterSignificant <- function(df){
+  subset <- as.data.frame(df) %>% mutate(tnumber = row.names(df)) %>% separate(tnumber, c('tnumber', 'group'),sep = '_')
+  nonZero_counts <- subset %>%
+    group_by(group) %>%
+    summarise(across(everything(), ~ sum(. != 0)))
+  melted_nonzero <- as.data.frame(t(nonZero_counts %>% dplyr::select(-c('group','tnumber'))))
+  melted_nonzero <- melted_nonzero %>% mutate(sig = ifelse((as.numeric(V1) > 5) &(as.numeric(V2) > 5), T, F))
+  
+  significant_features <- rownames(data.frame(melted_nonzero[2:nrow(melted_nonzero),]) %>% filter(sig == T))
+  
+  return(significant_features)
+
+}
+
+
+
+shapeFeatures_structure <- shapeFeatures_structure[,filterSignificant(shapeFeatures_structure)] + 0.001
+scaleFeatures_structure <- scaleFeatures_structure[,filterSignificant(scaleFeatures_structure)] + 0.001
+
+```
+
+```{r}
+# Load required libraries
+library(multcomp)
+library(ggrepel)
+fold_threshold = 1
+p_value = -log10(0.05)
+
+computePvalues <- function(featureSet){
+  subset <- as.data.frame(featureSet) %>% mutate(tnumber = row.names(featureSet)) %>% separate(tnumber, c('tnumber', 'group'),sep = '_') %>% dplyr::select(-dplyr::any_of(c('tnumber'))) %>% mutate(group = ifelse((group == 'low' | group == 'low-density region'),'other',paste(gsub('_', ' ', structure_type),'')))%>% dplyr::select(-any_of(c('isTumour')))
+  
+  
+  # Create an empty vector to store the adjusted p-values and log2 fold changes
+  p_values <- rep(NA, ncol(subset)-1)
+  log2_fold_changes <- rep(NA, ncol(subset)-1)
+
+  # Perform univariate feature importance analysis for each feature
+  for (i in 1:(ncol(subset)-1)) {
+    # Extract the current feature
+    
+    feature_subset <- subset %>% filter(!(subset[, i] == 0.001 ))
+    # feature_subset <- subset
+
+    feature <- feature_subset[, i]
+    response <- feature_subset$group
+    
+    computePvalue <- function(feature, response) {
+    p_value <- tryCatch(
+        { p <- t.test(feature ~ response)$p.value
+        return(p)
+        
+        
+        },
+        error=function(cond) {
+            message(colnames(featureSet)[[i]])
+            return(1)
+        })
+        return(p_value)
+    }
+    
+    p_value <- computePvalue(feature, response)
+
+
+    # Calculate the log2 fold change between the response groups
+    mean_response <- tapply(feature, response, mean)
+
+    log2_fold_change <- log2((mean_response[paste(gsub('_', ' ', structure_type),'')]) / mean_response['other'])
+
+    # Store the p-value and log2 fold change in their respective vectors
+    p_values[i] <- p_value
+    log2_fold_changes[i] <- log2_fold_change
+  }
+
+  # Apply p-value adjustment method (e.g., Bonferroni, Benjamini-Hochberg)
+  adjusted_p_values <- p.adjust(p_values, method = "BH")
+
+  # Create a data frame with the features, p-values, log2 fold changes, and adjusted p-values
+  result <- data.frame(Feature = colnames(subset %>% dplyr::select(-c(group))),
+                       p_value = p_values,
+                       log2FoldChange = log2_fold_changes,
+                       Adjusted_p_value = adjusted_p_values,
+                        x_dense = mean_response[paste(gsub('_', ' ', structure_type),'')],
+                        x_sparse = mean_response['other'])%>%
+            mutate(Sig = ifelse(Adjusted_p_value < 0.05, T, F))
+
+  return(result)
+}
+
+
+univariateFeatures <- computePvalues(shapeFeatures_structure) %>% mutate(featureSet = 'shape')
+univariateFeatures <- rbind(univariateFeatures, (computePvalues(scaleFeatures_structure) %>% mutate(featureSet = 'scale')))
+univariateFeatures <- rbind(univariateFeatures, (computePvalues(densityFeatures_structure) %>% mutate(featureSet = 'density')))
+univariateFeatures <- univariateFeatures %>% mutate(minlogP = -log(Adjusted_p_value, base = 10))
+univariateFeatures <- univariateFeatures %>% mutate(Feature = gsub('_CPh','', Feature,fixed=T))
+
+# univariateFeatures <- univariateFeatures %>% mutate(Sig = ifelse((minlogP > -log10(0.05)) & ((abs(log2FoldChange) > 1)),T,F))
+univariateFeatures <- univariateFeatures %>% mutate(Sig = ifelse((minlogP > -log10(0.05)),T,F))
+
+univariateFeatures <- univariateFeatures %>% filter(Feature %in% grep('CK', univariateFeatures$Feature, invert = T, fixed = T,value = T))
+
+```
+
+```{r}
+# Creating the volcano plot
+
+univariateFeatures <- univariateFeatures %>% mutate(`features` = ifelse(featureSet %in% c('shape', 'scale'), 'spatial feature', ifelse(featureSet == 'original_densities', 'fraction \n Danenenberg classification', 'fraction')))
+
+univariateFeatures <- univariateFeatures %>% filter(!(Feature == "Myofibroblasts_to_Fibroblasts"))
+
+top_values1 <- rbind(univariateFeatures %>% filter(Sig == T) %>% filter(log2FoldChange < 0) %>% filter(features == 'spatial feature') %>% slice_max(order_by = (minlogP), n = 5),univariateFeatures %>% filter(Sig == T)%>% filter(log2FoldChange < 0) %>% filter(features == 'fraction')) %>% distinct()
+top_values2 <- rbind(univariateFeatures %>% filter(Sig == T) %>% filter(log2FoldChange > 0) %>% filter(features == 'spatial feature') %>% slice_max(order_by = (minlogP), n = 5),univariateFeatures %>% filter(Sig == T)%>% filter(log2FoldChange > 0) %>% filter(features == 'fraction')) %>% distinct()
+
+top_values2 <- top_values2 %>% mutate(Feature = ifelse(Feature == 'Granulocytes_Macrophages_to_Granulocytes_Macrophages','Granulocytes_Macrophages_to\n_Granulocytes_Macrophages', Feature))
+
+
+p1 <- ggplot() +
+  # geom_vline(xintercept=c(-fold_threshold, fold_threshold), col="black") +
+  geom_hline(yintercept=-log10(0.05), col="black") +
+  geom_vline(xintercept = 0,linetype=1,color='black',alpha=0.5) +
+  geom_point(data = (univariateFeatures %>% filter(Sig == T)), aes(x = log2FoldChange, y =minlogP,colour=features),alpha=0.8) +
+  geom_point(data = (univariateFeatures %>% filter(Sig == F)), aes(x = log2FoldChange, y =minlogP),color='grey',alpha=0.8) +
+  geom_label_repel(data= univariateFeatures %>% filter(Sig == T), aes(x=log2FoldChange, y=minlogP, label=gsub('or','',gsub('_',' ',gsub('_originalType','',Feature))),fill=features),segment.color='black',min.segment.length = 0, color='white',size =4, ylim=c(2,NA),force=50) +
+    # geom_label_repel(data= top_values1, aes(x=log2FoldChange, y=minlogP, label=gsub('or','',gsub('_',' ',gsub('_originalType','',Feature))),fill=features),segment.color='black',min.segment.length = 0, color='white',size =4, xlim=c(NA,-2),ylim=c(2,NA),force=50) +
+    # geom_label_repel(data= top_values2, aes(x=log2FoldChange, y=minlogP, label=gsub('or','',gsub('_',' ',gsub('_originalType','',Feature))),fill=features),segment.color='black',min.segment.length = 0, color='white',size =4, xlim=c(1.5,NA),ylim=c(2,NA),force=200) +
+  
+  labs(x = "Log2 Fold Change",
+       y = "-log10 Adjusted P-value") +
+  theme_bw() + scale_x_continuous(limits = c(-5, 5)) + ggtitle(gsub('_', ' ', structure_type)) + theme(plot.title = element_text(hjust=0.5)) + scale_color_manual(breaks = c('density','shape','scale'),values = getDiscreteColors(4)[1:3]) + scale_colour_manual(name = '', breaks = c('fraction','spatial feature'),values = getDiscreteColors(3)[1:2])  + scale_fill_manual(name = '', breaks = c('fraction','spatial feature'),values = getDiscreteColors(3)[1:2]) + guides(colour = FALSE)
+
+
+ggsave(paste(outdir,'volcanoPlot_', gsub('+', 'plus',structure_type,fixed=T), '.pdf',sep=''),width=6,height=4)
+
+```
+
+
+
+```{r}
+significant_densityFeatures <- grep('_to_', univariateFeatures %>% filter(Sig == T) %>% pull(Feature),invert=T,value=T, fixed=T)
+significant_distanceFeatures <- unique(grep('_to_',univariateFeatures %>% filter(Sig == T) %>% pull(Feature),value = T))
+
+
+print(significant_densityFeatures)
+print(significant_distanceFeatures)
+
+# print(grep(paste(significant_densityFeatures,collapse="|"), significant_distanceFeatures,invert=T,value=T))
+# 
+grep(paste(c('B cells', 'CD8', 'CD4','Granulocytes_Macrophages', 'Fibroblasts', 'Myofibroblasts'),collapse="|"), significant_distanceFeatures,value=T, invert =T)
+
+
+#Vascular stroma
+# significant_distanceFeatures <- c('Granulocytes_Macrophages_to_Fibroblasts')
+
+#Active stroma
+# significant_distanceFeatures <- c("Fibroblasts_to_Fibroblasts","Myofibroblasts_to_Fibroblasts", "CD8+_cells_to_B cells")
+
+significant_distanceFeatures <- c("Myofibroblasts_to_CD8+_cells", "Myofibroblasts_to_B cells")
+
+
+```
+
+
+```{r}
+retrieveDistanceData <- function(type, parameter_df){
+  distance_data <- read_tsv(paste(here('scratch/AUCScaledSlides_300_'), type, '.tsv',sep='')) %>% as_tibble %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(phenotype_combo = paste(phenotype_from, phenotype_to, sep='_to_')) %>%
+  dplyr::select(tnumber, phenotype_combo, `N.per.mm2.scaled`, distance_window) %>%
+  mutate(new = `N.per.mm2.scaled` * 1000) %>%
+  mutate(new =round(new))
+  
+  estimated_distances <- distance_data  %>% unite('unique_sample', c(tnumber, phenotype_combo), remove=F) %>% filter(unique_sample %in% parameter_df$unique_sample)
+  
+  return(estimated_distances)
+  
+}
+
+computeMedians <- function(distance_data){
+    total_observations <- distance_data %>% group_by(unique_sample) %>%
+  summarise(total_observations= c_across(cols = c(N.per.mm2.scaled)) %>% sum())
+
+  medians <- merge(distance_data, total_observations, by='unique_sample', all.x=T)
+  medians <- medians %>% mutate(frequency = round((N.per.mm2.scaled / total_observations)*10000))
+  medians <- medians %>% group_by(unique_sample) %>% summarise(
+    median_observations = median(rep(distance_window,frequency))
+    )
+  return(medians)
+}
+```
+
+
+
+```{r}
+densities <- readRDS(paste(here('scratch/features/regions/cell_proportions_per_image_'),gsub('+', 'plus',structure_type,fixed=T),'.rds',sep = ''))
+names(densities) <- gsub('_CPh','',gsub('+', 'plus', names(densities), fixed = T))
+names(densities) <- gsub('_CPh','',gsub('-', 'min', names(densities), fixed = T))
+
+distance_data_structure <- retrieveDistanceData(gsub('+', 'plus',structure_type,fixed=T), allparameters_structure)
+medians_structure <- computeMedians(distance_data_structure)
+
+colors <- tibble(name = c(paste(gsub('_', ' ', structure_type),''),'other'), color = getDiscreteColors(3)[1:2])
+
+```
+
+```{r}
+
+DensityPlot <- function(df, response, feature){
+  d <- df %>% separate(ImageNumber, c('tnumber', 'region'),sep='_') %>% mutate(region = ifelse((region == 'low' | region == 'low-density region'),'other',paste(gsub('_', ' ', structure_type),'')))
+  
+  p <- ggboxplot(na.omit(d), x = 'region', y = feature, fill='region') + ylab('cell type fraction') + xlab('') + ggtitle(gsub('plus', '+', gsub('min', '-', feature, fixed = T), fixed = T)) + stat_compare_means(method = "t.test", label.x.npc = 'center', label.y.npc = 'top',label = 'p.format',color='red') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + scale_fill_manual(breaks = c(paste(gsub('_', ' ', structure_type),''),'other' ), values=getDiscreteColors(3)[1:2]) + theme(legend.position = "none") + theme(plot.title = element_text(size = 10,hjust=0.5))
+  return(p)
+}
+
+DensityPlot(densities, structure_type, 'B cells')
+ggsave(paste(outdir, 'TLS_like_B_cells.pdf',sep=''),width=5,height=4)
+```
+
+
+
+```{r}
+
+retrieveParameters <- function(df,structure,feature){
+  d <- data.frame(df) %>% dplyr::select(-dplyr::any_of(c('tnumber'))) %>% filter(phenotype_combo == feature) %>% rename(group = region)
+
+  mean_d <- d %>% group_by(group) %>% summarise(mean_shape = mean(shape), mean_scale =mean(scale))
+  # print(mean_d)
+  shape_group <- mean_d %>% filter(group == paste(gsub('_', ' ', structure_type),'')) %>% pull(mean_shape)
+  scale_group <-  mean_d %>% filter(group == paste(gsub('_', ' ', structure_type),'')) %>% pull(mean_scale)
+  shape_nogroup <- mean_d %>% filter(group == 'other') %>% pull(mean_shape)
+  scale_nogroup <- mean_d %>% filter(group == 'other') %>% pull(mean_scale)
+  
+  return(list('shape' = shape_group, 'scale' = scale_group, 'shape_alternative' = shape_nogroup, 'scale_alternative' = scale_nogroup))
+}
+
+
+create_boxplot <- function(df,medians, structure,feature){
+  d <- data.frame(df) %>% mutate(tnumber = row.names(df)) %>% dplyr::select(-dplyr::any_of(c('tnumber')))%>% filter(phenotype_combo == feature) %>% rename(group = region) %>% mutate(group = ifelse(grepl(structure, unique_sample,fixed =T), paste(gsub('_', ' ', structure_type),''), 'other'))
+  
+  medians <- medians %>% filter(grepl(feature, unique_sample,fixed = T) ) %>% mutate(group = ifelse(grepl(structure, unique_sample,fixed =T), paste(gsub('_', ' ', structure_type),''), 'other'))
+  
+    d$group <- factor(d$group, levels = c( paste(gsub('_', ' ', structure_type),''), 'other'))
+  medians$group <- factor(medians$group, levels = c( paste(gsub('_', ' ', structure_type),''), 'other'))
+  
+  b1 <- ggboxplot(na.omit(d),x='group', y='shape',fill='group') + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(), axis.ticks.x=element_blank(),legend.position = "none") + scale_fill_manual(breaks = c(paste(gsub('_', ' ', structure_type),''),'other' ), values=getDiscreteColors(3)[1:2]) + stat_compare_means(method = "t.test", label = "p.format", label.y.npc =0.9, label.x.npc = 'left',size=3,color='red') + plot_annotation(tag_level='A')
+  b2 <- ggboxplot(na.omit(d), x='group', y='scale',fill='group') + theme_bw() + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),legend.position = "none") + scale_fill_manual(breaks = c(paste(gsub('_', ' ', structure_type),''),'other' ), values=getDiscreteColors(3)[1:2])  + stat_compare_means(method = "t.test", label = "p.format", label.y.npc =0.9, label.x.npc = 'left',size=3,color='red') + plot_annotation(tag_level='A')
+  b3 <- ggboxplot(medians, x='group', y='median_observations',fill='group') + theme_bw() + ylab('median') + xlab('') + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),legend.position = "none") + scale_fill_manual(breaks = c(paste(gsub('_', ' ', structure_type),''),'other' ), values=getDiscreteColors(3)[1:2])  + stat_compare_means(method = "t.test", label = "p.format", label.y.npc =0.9, label.x.npc = 'left',size=3,color='red') + plot_annotation(tag_level='A')
+  
+  return(b1 + b2 + b3)
+  
+}
+
+showDistanceCurves <- function(df,medians, structure, feature){
+    params <- retrieveParameters(df,structure,feature)
+    print(params)
+    g1 <- ggplot() + 
+      stat_function(fun = dweibull, args = list(shape = params$shape,scale = params$scale), aes(colour=paste(gsub('_', ' ', structure_type),'')),n=600)  +
+      stat_function(fun = dweibull, args = list(shape = params$shape_alternative ,scale = params$scale_alternative), aes(colour='other'),n=600)  +
+    xlim(0,600) + theme_bw() + xlab('1-NN distance (micron)') + ylab('normalized counts') + ggtitle(gsub('_', ' ',feature,fixed=T)) + scale_color_manual(name='region',breaks = c(paste(gsub('_', ' ', structure_type),''),'other' ), values=getDiscreteColors(3)[1:2])  + theme(plot.title = element_text(size = 10,hjust=0.5))  + theme(legend.position=c(.85,.23))
+      
+    b1 <- create_boxplot(df,medians, structure,feature)
+    g_total <- g1 + inset_element(b1, 0.3, 0.5, 0.98, 0.98)
+
+    return(g_total)
+
+}
+
+
+# Show examples for every subtype
+for (i in significant_distanceFeatures){
+  p1 <- DensityPlot(densities,gsub('_', ' ',structure_type),gsub('+','plus',gsub('-','min',str_split(i,'_to_')[[1]][[1]], fixed=T),fixed=T)) +DensityPlot(densities,gsub('_', '',structure_type),gsub('+','plus',gsub('-','min',str_split(i,'_to_')[[1]][[2]],fixed=T),fixed=T)) + showDistanceCurves(allparameters_structure,medians_structure, gsub('_',' ',structure_type), i) +   plot_layout(widths = c(1, 1, 3 )) + plot_annotation(tag_level='A')
+
+
+  ggsave(paste(outdir,'plot_',gsub('+', 'plus',structure_type,fixed=T),gsub('+','plus',i,fixed=T),'.pdf', sep=''),width=14,height=7)
+
+}
+
+```
+
+Special plot for TLS-like neighborhood.
+```{r}
+DensityPlot(densities,gsub('_', ' ',structure_type),'Myofibroblasts') + showDistanceCurves(allparameters_structure,medians_structure, gsub('_',' ',structure_type), 'CD8+_cells_to_Myofibroblasts') +DensityPlot(densities,gsub('_', '',structure_type),'CD8plus_cells') + showDistanceCurves(allparameters_structure,medians_structure, gsub('_',' ',structure_type), 'Myofibroblasts_to_CD8+_cells')  + plot_layout(ncol=2,widths = c(1, 3, 1,3)) + plot_annotation(tag_level='A')
+
+ggsave(paste(outdir,'plot_',gsub('+', 'plus',structure_type,fixed=T),gsub('+','plus','Myofibroblasts_to_CD8+_cells',fixed=T),'.pdf', sep=''),width=12,height=14)
+
+```
+

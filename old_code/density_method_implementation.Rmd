@@ -1,0 +1,154 @@
+---
+title: "Density Estimation"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Compute density features
+
+```{r}
+# library(tidyverse)
+library(ggplot2)
+library(data.table)
+library(here)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+source(here('figure_styling.R'))
+library(dplyr)
+library(tidyverse)
+library(spatstat)
+library(dbscan)
+library(cowplot)
+```
+
+
+## cell type Densities
+
+```{r}
+cells <- getCellsAlternative()
+
+getCellCounts <- function(cells){
+  cell_counts <- cells %>% dplyr::select(c(ImageNumber,is_epithelial , meta_description)) %>%
+    dplyr::count(ImageNumber,is_epithelial, meta_description)
+  
+  expand_cell_counts <- cell_counts %>% tidyr::expand(ImageNumber,is_epithelial, meta_description)
+  
+  cell_counts <- merge(cell_counts, expand_cell_counts, by=c('ImageNumber','is_epithelial', 'meta_description'), all.y=T) %>% 
+    mutate(n = coalesce(n, 0))
+  
+  return(cell_counts)
+}
+
+cellCounts <- getCellCounts(cells)
+
+total_areas <- cells %>% group_by(ImageNumber, is_epithelial) %>% summarise(area = sum(AreaShape_Area))
+cellCounts <- merge(cellCounts, total_areas, by=c('ImageNumber', 'is_epithelial'),all.x=T)
+cellCounts <- cellCounts %>% mutate(area = as.numeric(area)*(1e-6))
+densities <- cellCounts %>% mutate(density = n/area)
+
+
+saveRDS(densities, here('scratch/features/cell_densitiesAlternative.rds'))
+```
+
+```{r}
+cell_fractions <- readRDS(here('scratch/features/cell_proportions_per_imageAlternative.rds'))%>% dplyr::select(-c('isTumour'))
+cell_fractions <- melt(cell_fractions, id = "ImageNumber")
+cell_fractions$variable <- gsub('_CPh','', cell_fractions$variable, fixed=T)
+
+cell_fractions <- cell_fractions %>% filter(value != 0) %>% rename(meta_description = variable) %>% rename(fraction = value)
+densities <- densities %>% filter(density != 0)
+
+totalDF <- merge(cell_fractions, densities, by=c('ImageNumber','meta_description'),all=T)
+```
+
+
+```{r}
+library(ggpubr)
+
+sp <- ggscatter(totalDF, x = "fraction", y = "density",
+   add = "reg.line", add.params = list(color = getDiscreteColors(3)[[1]]), conf.int = TRUE ) + xlab('fraction (count/total count)') + ylab('density (count/mm2)')
+# Add correlation coefficient
+p1 <- sp + stat_cor(method = "pearson", label.x = 0.35, label.y = 30000)
+
+print(p1)
+ggsave(here('output/Data_exploration/fractionVsDensity_alternative.pdf'))
+```
+
+```{r}
+totalDF %>% filter(density > 15000)
+
+totalDF %>% filter(density <5000 & fraction > 0.9)
+
+```
+```{r}
+show_slide(386, 'Myofibroblasts')
+show_slide(583, 'Fibroblasts')
+show_slide(583, 'Endothelial')
+
+
+show_slide(406, 'Granulocytes_Macrophages')
+
+```
+
+
+```{r}
+cells <- getCells()
+
+getCellCounts <- function(cells){
+  cell_counts <- cells %>% dplyr::select(c(ImageNumber,is_epithelial , meta_description)) %>%
+    dplyr::count(ImageNumber,is_epithelial, meta_description)
+  
+  expand_cell_counts <- cell_counts %>% tidyr::expand(ImageNumber,is_epithelial, meta_description)
+  
+  cell_counts <- merge(cell_counts, expand_cell_counts, by=c('ImageNumber','is_epithelial', 'meta_description'), all.y=T) %>% 
+    mutate(n = coalesce(n, 0))
+  
+  return(cell_counts)
+}
+
+cellCounts <- getCellCounts(cells)
+
+total_areas <- cells %>% group_by(ImageNumber, is_epithelial) %>% summarise(area = sum(AreaShape_Area))
+cellCounts <- merge(cellCounts, total_areas, by=c('ImageNumber', 'is_epithelial'),all.x=T)
+cellCounts <- cellCounts %>% mutate(area = as.numeric(area)*(1e-6))
+densities <- cellCounts %>% mutate(density = n/area)
+
+
+saveRDS(densities, here('scratch/features/cell_densities.rds'))
+```
+
+```{r}
+cell_fractions <- readRDS(here('scratch/features/cell_proportions_per_image.rds'))%>% dplyr::select(-c('isTumour'))
+cell_fractions <- melt(cell_fractions, id = "ImageNumber")
+cell_fractions$variable <- gsub('_CPh','', cell_fractions$variable, fixed=T)
+
+cell_fractions <- cell_fractions %>% filter(value != 0) %>% rename(meta_description = variable) %>% rename(fraction = value)
+densities <- densities %>% filter(density != 0)
+
+totalDF <- merge(cell_fractions, densities, by=c('ImageNumber','meta_description'),all=T)
+```
+
+
+```{r}
+
+
+sp <- ggscatter(totalDF, x = "fraction", y = "density",
+   add = "reg.line", add.params = list(color = getDiscreteColors(3)[[1]]), conf.int = TRUE ) + xlab('fraction (count/total count)') + ylab('density (count/mm2)')
+# Add correlation coefficient
+p2 <- sp + stat_cor(method = "pearson", label.x = 0.35, label.y = 30000)
+
+ggsave(here('output/Data_exploration/fractionVsDensity_original.pdf'))
+
+p3 <- p2 + p1
+p3 <- p3 + plot_annotation(tag_levels = 'A')
+print(p3)
+
+ggsave(here('output/final_figures/methods/fractionvsdensity.pdf'),width=12,height=5)
+
+```

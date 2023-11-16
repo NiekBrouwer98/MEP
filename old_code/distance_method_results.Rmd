@@ -1,0 +1,1723 @@
+---
+title: "Distance method results"
+author: "Niek Brouwer"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: "hide"
+params:
+  save_files:
+    value: FALSE
+    choices:
+      - FALSE
+      - TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Distance feature result validation
+In this document we analyse the results from the Weibull parameter estimation on the METABRIC dataset and compare the results to the NABUCCO cohort to validate our estimation.
+
+```{r, include=FALSE}
+library(here)
+library(ggplot2)
+library(tidyverse)
+library(ggrepel)
+library(fst)
+source(here("UtilityFunctions.R"))
+source(here("MEP_UtilityFunctions.R"))
+library(Hmisc)
+library(knitr)
+library(tidyverse)
+library(corrplot)
+library(gridExtra)
+library(cowplot)
+library(grid)
+library(ComplexHeatmap)
+library(tidyHeatmap)
+library(umap)
+library(circlize)
+library(dplyr)
+library(ggsignif)
+library(ggpubr)
+source(here('figure_styling.R'))
+library(latex2exp)
+
+projectSeed <- 89230689
+set.seed(projectSeed)
+```
+
+Get data from original experiment. 
+```{r}
+clinical_data <- getClinical()
+
+cells <- getCells()
+cellCounts <- getCellCounts(cells)
+all_parameters <- getALLParameters()
+
+# Compute means of each combination
+means <- all_parameters %>% 
+  group_by(phenotype_from, phenotype_to ) %>% 
+  dplyr::summarise(mean_shape = mean(shape),
+            mean_scale  = mean(scale))
+
+# compute means of each sample
+means_images <- all_parameters %>% 
+  group_by(tnumber) %>% 
+  dplyr::summarise(mean_shape = mean(shape),
+            mean_scale  = mean(scale))
+
+all_distances_data <- readRDS(file  = here('scratch/AUCScaledSlides_300_ALL.rds'))
+all_distances_data <- all_distances_data %>% as_tibble %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(phenotype_combo = paste(phenotype_from, phenotype_to, sep='_to_')) %>%
+  dplyr::select(tnumber, phenotype_combo, `N.per.mm2.scaled`, distance_window) %>%
+  mutate(new = `N.per.mm2.scaled` * 1000) %>%
+  mutate(new =round(new))
+
+estimated_distances <- all_distances_data %>%
+unite('unique_sample', c(tnumber, phenotype_combo), remove=F) %>% filter(unique_sample %in% all_parameters$unique_sample)
+
+cellCombinationCounts <- getCombinationCounts(cells)
+
+```
+Get data from second experiment with alternative cell type classification.
+```{r}
+cellsAlt <- getCellsAlternative()
+cellCountsAlt <- getCellCounts(cellsAlt)
+all_parametersAlt <- getALLParametersAlternative()
+
+# Compute means of each combination
+means_combinationsAlt <- all_parametersAlt %>% 
+  group_by(phenotype_from, phenotype_to ) %>% 
+  dplyr::summarise(mean_shape = mean(shape),
+            mean_scale  = mean(scale))
+
+# compute means of each sample
+means_imagesAlt <- all_parametersAlt %>% 
+  group_by(tnumber) %>% 
+  dplyr::summarise(mean_shape = mean(shape),
+            mean_scale  = mean(scale))
+
+all_distances_dataAlt <- readRDS(file  = here('scratch/AUCScaledSlides_300_ALL_run2.rds'))
+all_distances_dataAlt <- all_distances_dataAlt %>% as_tibble %>%
+  mutate(distance_window = WinMean) %>%
+  mutate(phenotype_combo = paste(phenotype_from, phenotype_to, sep='_to_')) %>%
+  dplyr::select(tnumber, phenotype_combo, `N.per.mm2.scaled`, distance_window) %>%
+  mutate(new = `N.per.mm2.scaled` * 1000) %>%
+  mutate(new =round(new))
+
+estimated_distancesAlt <- all_distances_dataAlt %>%
+unite('unique_sample', c(tnumber, phenotype_combo), remove=F) %>% filter(unique_sample %in% all_parametersAlt$unique_sample)
+
+cellCombinationCountsAlt <- getCombinationCounts(cellsAlt)
+
+```
+
+
+
+## Initial parameters
+We don't have estimations for all combinations in all samples. This is expected because distance relationships cannot be estimated for cell type that are not present or that are present in very low proportions.
+We decide that distance relationships between less than 20 reference cells and 5 target cells are not trustworthy and robust and we therefore skip these relationships. 
+
+```{r}
+# Original experiment
+initial_parameters <- read_rds(here('scratch/initial_parameters.rds'))
+
+not_estimated_samples <- cellCombinationCounts  %>% filter(! unique_sample %in% all_parameters$unique_sample)
+not_initialized_samples <- cellCombinationCounts %>% filter(! unique_sample %in% initial_parameters$unique_sample)
+
+results <- tibble(category = c('all', 'existing','20to5','20to20'), estimated = rep(NA, 4), not_estimated  = rep(NA, 4))
+
+results <- results %>% mutate(estimated = replace(estimated, category == "all", length(intersect(cellCombinationCounts %>% pull(unique_sample), all_parameters %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "all", length(setdiff(cellCombinationCounts %>% pull(unique_sample), all_parameters %>% pull(unique_sample)))))
+
+results <- results %>% mutate(estimated = replace(estimated, category == "existing", length(intersect(cellCombinationCounts %>% filter(n_from >0 & n_to > 0) %>% pull(unique_sample), all_parameters %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "existing", length(setdiff(cellCombinationCounts %>% filter(n_from >0 & n_to > 0) %>% pull(unique_sample), all_parameters %>% pull(unique_sample)))))
+                                                  
+results <- results %>% mutate(estimated = replace(estimated, category == "20to5", length(intersect(cellCombinationCounts %>% filter(n_from >20 & n_to > 5) %>% pull(unique_sample), all_parameters %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "20to5", length(setdiff(cellCombinationCounts %>% filter(n_from >20 & n_to > 5) %>% pull(unique_sample), all_parameters %>% pull(unique_sample)))))
+
+results <- results %>% mutate(estimated = replace(estimated, category == "20to20", length(intersect(cellCombinationCounts %>% filter(n_from >20 & n_to > 20) %>% pull(unique_sample), all_parameters %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "20to20", length(setdiff(cellCombinationCounts %>% filter(n_from >20 & n_to > 20) %>% pull(unique_sample), all_parameters %>% pull(unique_sample)))))
+
+results_original <- results %>% mutate(experiment = 'original_experiment')
+
+# Second experiment
+results <- tibble(category = c('all', 'existing','20to5','20to20'), estimated = rep(NA, 4), not_estimated  = rep(NA, 4))
+
+initial_parametersAlt <- read_rds(here('scratch/initial_parameters_run2.rds'))
+not_estimated_samplesAlt <- cellCombinationCountsAlt  %>% filter(! unique_sample %in% all_parametersAlt$unique_sample)
+not_initialized_samplesAlt <- cellCombinationCountsAlt %>% filter(! unique_sample %in% initial_parametersAlt$unique_sample)
+
+results <- results %>% mutate(estimated = replace(estimated, category == "all", length(intersect(cellCombinationCountsAlt %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(estimated, category == "all", length(setdiff(cellCombinationCountsAlt %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample)))))
+
+results <- results %>% mutate(estimated = replace(estimated, category == "existing", length(intersect(cellCombinationCountsAlt %>% filter(n_from >0 & n_to > 0) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "existing", length(setdiff(cellCombinationCountsAlt %>% filter(n_from >0 & n_to > 0) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample)))))
+                                                  
+results <- results %>% mutate(estimated = replace(estimated, category == "20to5", length(intersect(cellCombinationCountsAlt %>% filter(n_from >20 & n_to > 5) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "20to5", length(setdiff(cellCombinationCountsAlt %>% filter(n_from >20 & n_to > 5) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample)))))
+
+results <- results %>% mutate(estimated = replace(estimated, category == "20to20", length(intersect(cellCombinationCountsAlt %>% filter(n_from >20 & n_to > 20) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample))))) %>% mutate(not_estimated = replace(not_estimated, category == "20to20", length(setdiff(cellCombinationCountsAlt %>% filter(n_from >20 & n_to > 20) %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample)))))    
+
+results <- results %>% mutate(experiment = 'alternative_classification')
+results <- rbind(results, results_original)
+results_melted <- reshape2::melt(results) 
+
+g1 <- ggplot() +geom_bar(data = results_melted %>% filter(experiment == 'original_experiment'), aes(x=factor(category, level=c('all', 'existing', '20to5', '20to20')), y=value, fill=variable),stat="identity", position='fill')+ scale_y_continuous(labels = scales::percent_format()) + xlab('') + ylab('') + ggtitle('Original classification') + theme_bw() + theme(legend.position = "none")
+
+g2 <- ggplot() +geom_bar(data = results_melted %>% filter(experiment == 'alternative_classification'), aes(x=factor(category, level=c('all', 'existing', '20to5', '20to20')), y=value, fill=variable),stat="identity", position='fill')+ scale_y_continuous(labels = scales::percent_format()) + xlab('') + ylab('') + ggtitle('Alternative classification') + theme_bw()
+
+grid <- plot_grid(g1, g2, nrow=1, rel_widths = c(0.68,1))
+print(grid)
+save_plot(here('output/Distance_results/alternative_classification/proportion_increase.pdf'),grid, base_width = 8)
+```
+
+
+
+```{r}
+result = c()
+for (i in 1:100){
+  more <- (cellCombinationCounts %>% filter(n_from > i & n_to > i))
+  percentage <- nrow(more[(more$unique_sample %in% all_parameters$unique_sample),])/nrow(more)
+  result = c(result,percentage)
+}
+
+result2 = c()
+for (i in 1:100){
+  more <- (cellCombinationCountsAlt %>% filter(n_from > i & n_to > i))
+  percentage <- nrow(more[(more$unique_sample %in% all_parametersAlt$unique_sample),])/nrow(more)
+  result2 = c(result2,percentage)
+}
+
+result <- tibble(percentages = result) %>% mutate(n_cells = seq(1,100)) %>% mutate(category = 'original classification')
+result2 <- tibble(percentages = result2) %>% mutate(n_cells = seq(1,100)) %>% mutate(category = 'alternative classification')
+result <- rbind(result, result2)
+
+ggplot(data=result) + geom_point(aes(x=n_cells, y=percentages*100, colour=category)) + theme_bw() + ylab('percentage estimated') + xlab('n cells of both types in combination') + ylim(0,100) + ggtitle('cumulative distribution function of estimation count')
+
+ggsave(here('output/Distance_results/alternative_classification/estimated_samples_percentages.pdf'),width=7,height=5)
+```
+```{r}
+# settings <- tibble(from = seq(1,50),to = seq(1,50)) %>% tidyr::expand(from,to)
+# for (i in 1:nrow(settings)){
+#   t <- cell_occurences_combinations %>% filter(n_from >= settings[i,'from'][[1]] & n_to >= settings[i,'to'][[1]])
+#   settings[i,'percentage'] <- nrow(t %>% filter(unique_sample %in% all_parameters$unique_sample))/nrow(t)*100
+# }
+# 
+# ggplot(settings,aes(from, to)) + geom_tile(aes(fill=percentage)) + geom_text(aes(label=round(percentage)),size=1) +   scale_fill_gradientn(colours=c("white", "blue"), limits = c(95,100),name='succesful estimation %') + theme_bw()
+# ggsave(here('output/Distance_results/Missing_estimations_analysis/matrix.pdf'))
+
+```
+
+```{r}
+length(intersect(cellCombinationCounts %>% filter(n_from > 20 & n_to > 5) %>% pull(unique_sample), all_parameters  %>% pull(unique_sample)))/length(cellCombinationCounts %>% filter(n_from > 20 & n_to > 5) %>% pull(unique_sample))*100
+```
+```{r}
+length(intersect(cellCombinationCountsAlt %>% filter(n_from > 20 & n_to > 5) %>% pull(unique_sample), all_parametersAlt  %>% pull(unique_sample)))/length(cellCombinationCountsAlt %>% filter(n_from > 20 & n_to > 5) %>% pull(unique_sample))*100
+```
+
+## Estimations per combination
+
+From the figures above we can conclude that 76% of the trustworthy combinations were estimated. When there are more than 20 cells of both reference and target type, the estimations succeed in 96% of the times.
+Although this confirms that our method works well, we still have some cell types that occur rarely.
+Let's test how many estimations we have for every combination. If we want to use it in further downstream analyses we at least want 50 estimations.
+
+```{r}
+all_possible_samples <- cellCombinationCounts %>% filter(n_to >= 5 & n_from >= 20)
+samples <- all_possible_samples %>% pull(unique_sample)
+all_possibilities_counts <- all_possible_samples  %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+all_parameters_counts <- all_parameters %>% filter(unique_sample %in% samples)  %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>% rename(n_estimated = n)
+all_parameters_counts <- merge(all_parameters_counts, all_possibilities_counts %>% dplyr::select(c(phenotype_combo,n)), all.x=T, by='phenotype_combo') %>% mutate(n_est_p = (n_estimated/(n+1))*100)
+
+originalCellTypes <- originalCellTypeLabels()
+
+library(circlize)
+col_fun = colorRamp2(c(0,794), c("white", "red"))
+
+all_possibilities_matrix <- reshape2::dcast(all_possibilities_counts,phenotype_to  ~ phenotype_from, value.var = 'n')
+rownames(all_possibilities_matrix) <- all_possibilities_matrix %>% pull(phenotype_to)
+all_possibilities_matrix <- all_possibilities_matrix %>% dplyr::select(-c(phenotype_to))
+all_possibilities_matrix <- all_possibilities_matrix   %>% replace(is.na(.), 0)
+
+# hc = hclust(dist(t(all_possibilities_matrix)))
+# column_order = colnames(all_possibilities_matrix)[hc$order]
+# 
+# hm1 <- Heatmap(all_possibilities_matrix, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 6),
+#   row_names_gp = grid::gpar(fontsize = 6), column_title = 'phenotype_from', row_title = 'phenotype_to')
+# save_pdf(hm1, filename = here('output/Distance_results/Missing_estimations_analysis/allpossibleHM2.pdf'),width=7,height=6)
+# 
+all_parameters_matrix <- reshape2::dcast(all_parameters_counts,phenotype_to  ~ phenotype_from, value.var = 'n_estimated')
+rownames(all_parameters_matrix) <- all_parameters_matrix %>% pull(phenotype_to)
+all_parameters_matrix <- all_parameters_matrix %>% dplyr::select(-c(phenotype_to))
+all_parameters_matrix <- all_parameters_matrix   %>% replace(is.na(.), 0)
+
+counts <- cells %>% group_by(meta_description) %>% count()
+counts <- merge( tibble(meta_description = rownames(all_parameters_matrix)), counts, by='meta_description') %>% pull(n)
+column_ha = HeatmapAnnotation(count = anno_barplot(counts, ylim = c(0,2.5e5)))
+
+rownames(all_parameters_matrix) <- merge( tibble(name = rownames(all_parameters_matrix)), originalCellTypes, by='name') %>% pull(conversion)
+colnames(all_parameters_matrix) <- merge( tibble(name = colnames(all_parameters_matrix)), originalCellTypes, by='name') %>% pull(conversion)
+
+hm1 <- Heatmap(all_parameters_matrix, bottom_annotation = column_ha, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 8),
+  row_names_gp = grid::gpar(fontsize = 8),column_title = 'phenotype from', row_title = 'phenotype to', column_labels = sapply(colnames(all_parameters_matrix), latex2exp::TeX),row_labels = sapply(rownames(all_parameters_matrix), latex2exp::TeX))
+save_pdf(hm1, filename = here('output/final_figures/estimations_orginalClassification_HM.pdf'),width=7,height=6)
+
+
+```
+
+```{r}
+alternativeCellTypes <- alternativeCellTypeLabels()
+
+all_possible_samples <- cellCombinationCountsAlt %>% filter(n_to >= 5 & n_from >= 20)
+samples <- all_possible_samples %>% pull(unique_sample)
+all_possibilities_counts <- all_possible_samples  %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE)
+
+all_parameters_counts <- all_parametersAlt %>% filter(unique_sample %in% samples)  %>% dplyr::count(phenotype_combo) %>%
+  separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>% rename(n_estimated = n)
+all_parameters_counts <- merge(all_parameters_counts, all_possibilities_counts %>% dplyr::select(c(phenotype_combo,n)), all.x=T, by='phenotype_combo') %>% mutate(n_est_p = (n_estimated/(n+1))*100)
+
+# all_possibilities_matrix <- reshape2::dcast(all_possibilities_counts,phenotype_to  ~ phenotype_from, value.var = 'n')
+# rownames(all_possibilities_matrix) <- all_possibilities_matrix %>% pull(phenotype_to)
+# all_possibilities_matrix <- all_possibilities_matrix %>% dplyr::select(-c(phenotype_to))
+# all_possibilities_matrix <- all_possibilities_matrix   %>% replace(is.na(.), 0)
+# 
+# hc = hclust(dist(t(all_possibilities_matrix)))
+# column_order = colnames(all_possibilities_matrix)[hc$order]
+# 
+# hm1 <- Heatmap(all_possibilities_matrix, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 6),
+#   row_names_gp = grid::gpar(fontsize = 6), column_title = 'phenotype_from', row_title = 'phenotype_to')
+# save_pdf(hm1, filename = here('output/Distance_results/alternative_classification/allpossibleHM2_alternative.pdf'),width=7,height=6)
+
+
+
+all_parameters_matrix_alternative <- reshape2::dcast(all_parameters_counts,phenotype_to  ~ phenotype_from, value.var = 'n_estimated')
+rownames(all_parameters_matrix_alternative) <- all_parameters_matrix_alternative %>% pull(phenotype_to)
+all_parameters_matrix_alternative <- all_parameters_matrix_alternative %>% dplyr::select(-c(phenotype_to))
+all_parameters_matrix_alternative <- all_parameters_matrix_alternative   %>% replace(is.na(.), 0)
+
+
+counts <- cellsAlt %>% group_by(meta_description) %>% count()
+counts <- merge( tibble(meta_description = rownames(all_parameters_matrix_alternative)), counts, by='meta_description') %>% pull(n)
+column_ha = HeatmapAnnotation(count = anno_barplot(counts, ylim = c(0,2.5e5)))
+
+rownames(all_parameters_matrix_alternative) <- merge( tibble(name = rownames(all_parameters_matrix_alternative)), alternativeCellTypes, by='name') %>% pull(conversion)
+colnames(all_parameters_matrix_alternative) <- merge( tibble(name = colnames(all_parameters_matrix_alternative)), alternativeCellTypes, by='name') %>% pull(conversion)
+
+hm1 <- Heatmap(all_parameters_matrix_alternative,name='No. estimated \n samples', bottom_annotation = column_ha, cluster_rows = T, cluster_columns = T, col=col_fun, column_names_gp = grid::gpar(fontsize = 8),
+  row_names_gp = grid::gpar(fontsize = 8),column_title = 'phenotype from', row_title = 'phenotype to', column_labels = sapply(colnames(all_parameters_matrix_alternative), latex2exp::TeX),row_labels = sapply(rownames(all_parameters_matrix_alternative), latex2exp::TeX))
+save_pdf(hm1, filename = here('output/final_figures/estimations_AlternativeClassification_HM.pdf'),width=7,height=6)
+
+```
+The heatmaps look better, but there are also less cell types in the alternative classification. What is the proportion of black squares?
+```{r}
+print(100*length(which((all_parameters_matrix) < 50))/(length(all_parameters_matrix)*length(all_parameters_matrix)))
+
+print(100*length(which((all_parameters_matrix_alternative) < 50))/(length(all_parameters_matrix_alternative)*length(all_parameters_matrix_alternative)))
+
+```
+This is a significant improvement. Moreover, it is possible that cell types just don't exist together.
+
+
+The low estimation number can give problems in downstream analysis. If we want to analyse distance relationships in the entire cohort, we only want to include features that occur in enough samples.
+How many combinations are left when filtering is applied? 
+
+```{r}
+
+result <- data.frame(matrix(nrow=0, ncol=2))
+for (i in seq(5,100,5)){
+  int <- c(i, nrow(all_parameters %>% count(phenotype_combo) %>% filter(n > 794*(i/100))) )
+  result <- rbind(result, int)
+}
+
+result <- setNames(result, c('percentage', 'features'))
+result_original <- result %>% mutate(category = 'orginal classification') %>% mutate(features = 100*features/1024)
+
+result <- data.frame(matrix(nrow=0, ncol=2))
+for (i in seq(5,100,5)){
+  int <- c(i, nrow(all_parametersAlt %>% count(phenotype_combo) %>% filter(n > 794*(i/100))) )
+  result <- rbind(result, int)
+}
+
+result <- setNames(result, c('percentage', 'features'))
+result <- result %>% mutate(category = 'alternative classification') %>% mutate(features = 100*features/225)
+
+result <- rbind(result, result_original)
+
+ggplot(data=result) + geom_point(aes(x=percentage, y=features, colour=category)) + theme_bw() + xlab('sample %') + ylab('feature %')
+
+ggsave(here('output/Distance_results/alternative_classification/estimated_samples_filtering_percentages.pdf'),width=7,height=5)
+
+```
+```{r}
+show_slide(231, 'Fibroblasts')
+```
+
+
+
+## Failed features
+
+Look at the slides of the samples that were not estimated, but initialized.
+
+```{r}
+sample_points_notest <- sample_n(initial_parameters %>% filter(unique_sample %in% setdiff(initial_parameters%>% pull(unique_sample), not_estimated_samples%>% pull(unique_sample)) ), 5)
+
+for (row in 1:nrow(sample_points_notest)){
+  print(show_distance_distribution(cells, all_distances_data, sample_points_notest[row,],0.1))
+}
+
+```
+
+The initializations are often not very accurate.
+
+Look at the slides of the samples that were not initialized, but estimated.
+
+```{r}
+sample_points_notinit <- sample_n(all_parameters %>% filter(unique_sample %in% setdiff(all_parameters%>% pull(unique_sample), initial_parameters%>% pull(unique_sample)) ), 5)
+
+for (row in 1:nrow(sample_points_notinit)){
+  print(show_distance_distribution(cells, all_distances_data, sample_points_notinit[row,],0.05))
+
+}
+
+```
+
+Look at the slides of the samples that were not initialized and not estimated. Many are not estimated due to low cell counts, we don't consider them because this is a limitation of our data and not from our method. With the alternative classification we try to overcome this data limitation.
+
+```{r}
+show_distance_distribution_without_estimate <- function(all_distances_data, cells, sample){
+  sample_distance_data <- all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
+                                                                                                                 sample$phenotype_combo)
+  
+  dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) +   geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5) +
+  xlim(0,300) + ylim(0,0.12) +  theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
+  
+  slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
+                 filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]])) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description),size=6, alpha =0.5)+
+    theme_bw() + ggtitle(paste('imagenumber: ', sample['tnumber'][[1]]))
+
+return(plot_grid(dist, slide, rel_widths = c(1,1.7)))
+                         
+}
+
+failedcombinations <- cellCombinationCounts %>% filter(unique_sample %in% setdiff(cellCombinationCounts %>% pull(unique_sample), all_parameters %>% pull(unique_sample))) %>% filter(n_to > 5 & n_from > 20)
+
+print(paste('Number of valid but failed distance distributions:', nrow(failedcombinations)))
+
+failedcombinations_samples <- sample_n(failedcombinations, 5)
+
+for (row in 1:nrow(failedcombinations_samples)){
+  print(show_distance_distribution_without_estimate(all_distances_data,cells, failedcombinations_samples[row,]))
+
+}
+
+failedcombinationsAlt <- cellCombinationCountsAlt %>% filter(unique_sample %in% setdiff(cellCombinationCountsAlt %>% pull(unique_sample), all_parametersAlt %>% pull(unique_sample))) %>% filter(n_to > 5 & n_from < 10)
+
+print(paste('Number of valid but failed distance distributions in alternative classification:', nrow(failedcombinationsAlt)))
+
+
+failedcombinations_samples <- sample_n(failedcombinationsAlt, 5)
+
+for (row in 3){
+  print(show_distance_distribution_without_estimate(all_distances_dataAlt,cellsAlt, failedcombinations_samples[row,]))
+  ggsave(here('output/Distance_results/rarecombination.pdf'),width=12)
+}
+
+```
+
+Estimations are not trustworthy and probably not possible when cell type occurrences fall below our set thresholds. This is a limitation of our dataset.
+
+Additionally, there are also some samples with high counts, but without estimation.
+
+
+```{r}
+print(paste('Number of unestimated samples above 20-20 thresholds:', nrow(failedcombinations %>% filter(n_from > 20 & n_to > 20))))
+
+sample_points_notinit_and_notest <- sample_n(failedcombinations %>% filter(n_from > 20 & n_to > 20),5)
+
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(show_distance_distribution_without_estimate(all_distances_data,cells, sample_points_notinit_and_notest[row,]))
+}
+
+print(paste('Number of unestimated samples above 20-20 thresholds:', nrow(failedcombinationsAlt %>% filter(n_from > 20 & n_to > 20))))
+
+sample_points_notinit_and_notest <- sample_n(failedcombinationsAlt %>% filter(n_from > 20 & n_to > 20),5)
+
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(show_distance_distribution_without_estimate(all_distances_dataAlt, cellsAlt, sample_points_notinit_and_notest[row,]))
+}
+
+
+```
+
+Possibly, the unestimated samples have very different distributions compared to the distribution population.
+
+```{r}
+compare_samples <- function(highlight_tnumber, c){
+  dist <- bind_rows(estimated_distances %>% filter(phenotype_combo == c) %>% group_by(distance_window)%>% dplyr::summarize(N.per.mm2.scaled = mean(N.per.mm2.scaled)) %>%
+                      mutate(plot = 'other estimates'), all_distances_data %>% filter((tnumber == highlight_tnumber & phenotype_combo == c)) %>% mutate(plot = 'not estimated distributions')) %>%
+  ggplot(aes(x=distance_window, y=N.per.mm2.scaled, fill=plot)) +
+  geom_bar(stat="identity", position = position_identity(), alpha=0.5) + theme_bw() +
+  ggtitle(paste(c, '(', length(unique(estimated_distances %>% filter(phenotype_combo == c) %>% pull(tnumber))), 'estimates)'))
+
+return(dist)
+}
+
+sample_points_notinit_and_notest <- failedcombinations %>% filter(n_from > 50 & n_to > 50)
+for (row in 1:nrow(sample_points_notinit_and_notest)){
+  print(compare_samples(sample_points_notinit_and_notest[row,]['tnumber'][[1]],sample_points_notinit_and_notest[row,]['phenotype_combo'][[1]] ))
+}
+
+```
+
+## Patient subtype specific combinations
+
+The low estimation number can give problems in downstream analysis. If we want to analyse distance relationships in the entire cohort, we only want to include features that occur in enough samples.
+Some combinations may only be present in specific patient subtypes. 
+
+
+```{r}
+cellCounts_withlabels <- merge(cellCounts, clinical_data %>% dplyr::select(c('PAM50', 'ImageNumber')), by.x='tnumber', by.y='ImageNumber')
+mediansCounts <- cellCounts_withlabels %>% group_by(PAM50, meta_description) %>% dplyr::summarise(median = median(n))
+
+ggplot(mediansCounts) + geom_tile(aes(x=PAM50, y=meta_description, fill=median)) + geom_text(aes(x=PAM50, y=meta_description, label=median))
+ggsave(here('output/Data_exploration/medianCounts.pdf'))
+
+totalCounts <- cellCounts_withlabels %>% group_by(tnumber) %>% dplyr::summarise(sum = sum(n))
+cellCounts_withlabels <- merge(cellCounts_withlabels, totalCounts, by='tnumber') %>% mutate(proportional_n = (n/sum)*100)
+medianProportions <- cellCounts_withlabels %>% group_by(PAM50, meta_description) %>% dplyr::summarise(median = median(proportional_n))
+
+ggplot(medianProportions) + geom_tile(aes(x=PAM50, y=meta_description, fill=median)) + geom_text(aes(x=PAM50, y=meta_description, label=round(median,2)))
+ggsave(here('output/Data_exploration/medianProportions.pdf'))
+
+``` 
+Are parameters estimations biased toward subtypes?
+
+```{r}
+parameters_with_subtypes <- merge(all_parameters, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")), by.x='tnumber', by.y='ImageNumber')
+estimation_counts <- parameters_with_subtypes %>% group_by(PAM50, phenotype_combo) %>% dplyr::count() %>% separate(phenotype_combo, c('phenotype_from',"phenotype_to"), sep='_to_',remove=F)
+subtype_counts <- clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")) %>% group_by(PAM50) %>% dplyr::count() %>% rename(n_total = n)
+estimation_counts <- merge(estimation_counts, subtype_counts, by='PAM50')
+estimation_counts <- estimation_counts %>% mutate(n_prop = n/n_total)
+
+
+medians <- estimation_counts %>% group_by(phenotype_combo) %>% dplyr::summarise(mean = mean(n_prop), sd = sd(n_prop))
+estimation_counts <- merge(estimation_counts, medians, by='phenotype_combo')
+significant_estimationCounts <- estimation_counts %>% filter(n_prop > (mean + sd)) %>% filter(n > 50)  %>% filter(n_prop > 0.5)
+
+print(significant_estimationCounts)
+
+```
+```{r}
+parameters_with_subtypes <- merge(all_parametersAlt, clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")), by.x='tnumber', by.y='ImageNumber')
+estimation_countsAlt <- parameters_with_subtypes %>% group_by(PAM50, phenotype_combo) %>% dplyr::count() %>% separate(phenotype_combo, c('phenotype_from',"phenotype_to"), sep='_to_',remove=F)
+subtype_counts <- clinical_data %>% dplyr::select(c("ImageNumber", "PAM50")) %>% group_by(PAM50) %>% dplyr::count() %>% rename(n_total = n)
+estimation_countsAlt <- merge(estimation_countsAlt, subtype_counts, by='PAM50')
+estimation_countsAlt <- estimation_countsAlt %>% mutate(n_prop = n/n_total)
+
+
+medians <- estimation_countsAlt %>% group_by(phenotype_combo) %>% dplyr::summarise(mean = mean(n_prop), sd = sd(n_prop))
+estimation_countsAlt <- merge(estimation_countsAlt, medians, by='phenotype_combo')
+significant_estimationCountsAlt <- estimation_countsAlt %>% filter(n_prop > (mean + sd)) %>% filter(n > 50)  %>% filter(n_prop > 0.5)
+
+print(significant_estimationCountsAlt)
+```
+
+
+## Estimated parameters
+Filter out the outliers.
+
+```{r}
+# distances <- tibble(distance_window = c(1:600))
+# unique_samples <- unique(estimated_distances %>% pull(unique_sample))
+# # unique_samples <- c('134_CK^{lo}ER^{med}_to_ER^{hi}CXCL12^{+}')
+# estimated_distances <- estimated_distances %>% dplyr::select(-c(tnumber, phenotype_combo))
+# 
+# library(doMC)
+# 
+# cores = detectCores()
+# registerDoMC(cores[1])
+# RMSE <- do.call(rbind, mclapply(unique_samples, function(s){
+#  distance_combinations <- tidyr::crossing(s, distances) %>% rename(unique_sample = 1)
+#   estimated_distances_sample <- merge(distance_combinations, estimated_distances %>% 
+#                                         filter(unique_sample == s), by = c('unique_sample', 'distance_window'), all.x=T)  %>% replace_na(list(N.per.mm2.scaled = 0))
+#   estimated_distances_sample <- merge(estimated_distances_sample, all_parameters %>% dplyr::select(c(unique_sample, shape,scale)), by='unique_sample',all.x = T)
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(predicted = dweibull(x=distance_window, shape=shape, scale=scale))
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(residual = (predicted - N.per.mm2.scaled))
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(sqt_residuals = residual^2)
+#   
+#   RMSE_sample <- estimated_distances_sample %>% group_by(unique_sample) %>%
+#   summarise(length_vector = c_across(cols = c(sqt_residuals)) %>% length(),
+#               sum_vector = c_across(cols = c(sqt_residuals)) %>% sum(),
+#               mean_error = sum_vector/length_vector,
+#               MSE = mean_error %>% sqrt()) 
+#   return(RMSE_sample)
+# },mc.cores = 24))
+
+# NOT PARALLELLIZED METHOD
+# RMSE <- data.frame(matrix(nrow = 0, ncol = 5))
+# for (s in unique_samples){
+#   distance_combinations <- tidyr::crossing(s, distances) %>% rename(unique_sample = 1)
+#   estimated_distances_sample <- merge(distance_combinations, estimated_distances %>% filter(unique_sample == s), by = c('unique_sample', 'distance_window'), all.x=T)  %>% replace_na(list(N.per.mm2.scaled = 0))
+#   estimated_distances_sample <- merge(estimated_distances_sample, all_parameters %>% dplyr::select(c(unique_sample, shape,scale)), by='unique_sample',all.x = T)
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(predicted = dweibull(x=distance_window, shape=shape, scale=scale))
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(residual = (predicted - N.per.mm2.scaled))
+#   estimated_distances_sample <- estimated_distances_sample %>% mutate(sqt_residuals = residual^2)
+# 
+#   RMSE_sample <- estimated_distances_sample %>% group_by(unique_sample) %>%
+#   summarise(length_vector = c_across(cols = c(sqt_residuals)) %>% length(),
+#               sum_vector = c_across(cols = c(sqt_residuals)) %>% sum(),
+#               mean_error = sum_vector/length_vector,
+#               MSE = mean_error %>% sqrt())
+# 
+#   RMSE <- rbind(RMSE, RMSE_sample)
+# }
+# saveRDS(RMSE, file=here('scratch/RMSE.rds'))
+
+
+# Compute predicted and observed median
+computeMedianOutliers <- function(estimated_distances, all_parameters){
+  total_observations <- estimated_distances %>% group_by(unique_sample) %>%
+  summarise(total_observations= c_across(cols = c(N.per.mm2.scaled)) %>% sum())
+
+  medians <- merge(estimated_distances, total_observations, by='unique_sample', all.x=T)
+  medians <- medians %>% mutate(frequency = round((N.per.mm2.scaled / total_observations)*10000))
+  medians <- medians %>% group_by(unique_sample) %>% summarise(
+    median_observations = median(rep(distance_window,frequency))
+    )
+  
+  medians <- merge(medians, all_parameters %>% dplyr::select(c(unique_sample, shape,scale)), by='unique_sample',all.y = T)
+  medians <- medians %>% mutate(median_weibull = scale * (log(2))^(1/shape))
+  medians <- medians %>% mutate(difference = abs(median_weibull - median_observations))
+  
+  return(medians)
+    
+}
+
+medians <- computeMedianOutliers(estimated_distancesAlt, all_parametersAlt)
+
+saveRDS(medians, file=here('scratch/mediansAlt.rds'))
+
+
+```
+
+```{r}
+# RMSE <- read_rds(here('scratch/RMSE.rds'))
+# quantiles <- as_tibble(quantile(RMSE$MSE,probs=c(seq(0,1,0.1),0.95,0.99,0.999))) %>% mutate(quantiles=paste(100* c(seq(0,1,0.1),0.95,0.99,0.999), '%'))
+# 
+# ggplot() + geom_point(data=RMSE,aes(x=MSE, y=1),alpha=0.05,size=5) + geom_point(data=quantiles, aes(x=value,y=1,color=quantiles),size=7,shape=3) +
+# scale_color_discrete(breaks=paste(100* c(seq(0,0.9,0.1),0.95,0.99,0.999,1), '%'))+ theme_bw() + xlab('RMSE')
+# 
+# 
+# ggplot() + geom_histogram(data=RMSE, aes(x=MSE)) + scale_y_log10() + geom_vline(data=quantiles %>% filter(quantiles %in% c('90 %','95 %','99 %','99.9 %')), aes(xintercept=value,color=quantiles),linetype="dashed") +
+# scale_color_discrete(breaks=paste(100* c(seq(0,0.9,0.1),0.95,0.99,0.999,1), '%')) +theme_bw() + xlab('RMSE')
+# 
+# threshold <- quantiles %>% filter(quantiles == '99 %') %>% pull(value)
+# outliers <- RMSE %>% filter(MSE > threshold) %>% pull(unique_sample)
+# outlier_points <- all_parameters %>% filter((unique_sample %in% outliers))
+
+# We use the medians method
+medians <- read_rds(here('scratch/medians.rds'))
+quantiles <- as_tibble(quantile(medians$difference,probs=c(seq(0,1,0.1),0.95,0.99,0.999))) %>% mutate(quantiles=paste(100*c(seq(0,1,0.1),0.95,0.99,0.999), '%'))
+
+ggplot() + geom_point(data=medians,aes(x=difference, y=1),alpha=0.05,size=5) + geom_point(data=quantiles, aes(x=value,y=1,color=quantiles),size=7,shape=3) +
+scale_color_discrete(breaks=paste(100* c(seq(0,0.9,0.1),0.95,0.99,0.999,1), '%')) + theme_bw()
+
+ggplot() + geom_histogram(data=medians, aes(x=difference)) + scale_y_log10() + geom_vline(data=quantiles %>% filter(quantiles %in% c('90 %','95 %','99 %','99.9 %')), aes(xintercept=value,color=quantiles),linetype="dashed") +
+scale_color_discrete(breaks=paste(100* c(seq(0,0.9,0.1),0.95,0.99,0.999,1), '%')) + theme_bw() + xlab('delta median')
+
+threshold <- quantiles %>% filter(quantiles == '95 %') %>% pull(value)
+outliers <- medians %>% filter(difference > 80) %>% pull(unique_sample)
+outlier_points <- all_parameters %>% filter((unique_sample %in% outliers))
+
+saveRDS(outlier_points, here('scratch/outlier_parameters.rds'))
+
+mediansAlt <- read_rds(here('scratch/mediansAlt.rds'))
+quantiles <- as_tibble(quantile(mediansAlt$difference,probs=c(seq(0,1,0.1),0.95,0.99,0.999))) %>% mutate(quantiles=paste(100*c(seq(0,1,0.1),0.95,0.99,0.999), '%'))
+ggplot() + geom_histogram(data=mediansAlt, aes(x=difference)) + scale_y_log10() + geom_vline(data=quantiles %>% filter(quantiles %in% c('90 %','95 %','99 %','99.9 %')), aes(xintercept=value,color=quantiles),linetype="dashed") +
+scale_color_discrete(breaks=paste(100* c(seq(0,0.9,0.1),0.95,0.99,0.999,1), '%')) + theme_bw() + xlab('delta median')
+
+outliers <- mediansAlt %>% filter(difference > 80) %>% pull(unique_sample)
+outlier_points <- all_parametersAlt %>% filter((unique_sample %in% outliers))
+saveRDS(outlier_points, here('scratch/outlier_parametersAlt.rds'))
+
+
+```
+
+# Original Classification
+
+## C-shaped curve
+Does the parameter distribution look like a C-curve?
+
+```{r plot all parameters}
+all_parameters <- getALLParameters()
+outliers_original <- read_rds(here('scratch/outlier_parameters.rds')) %>% pull(unique_sample)
+below_threshold <- cellCombinationCounts %>% filter(n_from < 20 | n_to < 5) %>% pull(unique_sample)
+
+g1 <- ggplot() + 
+  geom_point(data = all_parameters, aes(x=shape, y=scale), color='black',alpha=0.05, size=0.5) +
+  geom_point(data = all_parameters %>% filter((unique_sample %in% outliers_original)), aes(x=shape, y=scale,color='outlier'), alpha=0.5, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("All parameters with outliers") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+g2 <- ggplot() + 
+  geom_point(data = all_parameters, aes(x=shape, y=scale), color='black',alpha=0.05, size=0.5) +
+  geom_point(data = all_parameters %>% filter((unique_sample %in% below_threshold)), aes(x=shape, y=scale,color='below\n threshold'), alpha=0.5, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("All parameters with unreliable estimations") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+g3 <- ggplot() + 
+  geom_point(data = all_parameters %>% filter(!(unique_sample %in% outliers_original))  %>% filter(!(unique_sample %in% below_threshold)), aes(x=shape, y=scale), color='black',alpha=0.1, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Final parameters") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+p <- addLabelToGrid(plot_grid(g1,g2,g3, nrow=1), 'Original Parameters')
+# save_plot(here('output/Distance_results/curveSpace_analysis/parameterSpace.png'),p, base_width=15, base_height=5)
+
+
+outliersAlt <- read_rds(here('scratch/outlier_parametersAlt.rds')) %>% pull(unique_sample)
+below_thresholdAlt <- cellCombinationCountsAlt %>% filter(n_from < 20 | n_to < 5) %>% pull(unique_sample)
+
+g1 <- ggplot() + 
+  geom_point(data = all_parametersAlt, aes(x=shape, y=scale), color='black',alpha=0.05, size=0.5) +
+  geom_point(data = all_parametersAlt %>% filter((unique_sample %in% outliersAlt)), aes(x=shape, y=scale,color='outlier'), alpha=0.5, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("All parameters with outliers") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+g2 <- ggplot() + 
+  geom_point(data = all_parametersAlt, aes(x=shape, y=scale), color='black',alpha=0.05, size=0.5) +
+  geom_point(data = all_parametersAlt %>% filter((unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale,color='below\n threshold'), alpha=0.5, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("All parameters with unreliable estimations") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+g3 <- ggplot() + 
+  geom_point(data = all_parametersAlt %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale), color='black',alpha=0.1, size=0.5) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Final parameters") + 
+  guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position = "none")
+
+p <- addLabelToGrid(plot_grid(g1,g2,g3, nrow=1), 'Alternative Parameters')
+save_plot(here('output/Distance_results/alternative_classification/parameterSpace.png'),p, base_width=15, base_height=5)
+
+```
+
+```{r}
+all_parameters_withMedianDifferences <- merge(all_parameters, medians %>% dplyr::select(c(unique_sample, difference)), by='unique_sample', all.x=T)  %>% arrange(difference)
+
+ggplot() +
+  geom_point(data = all_parameters_withMedianDifferences, aes(x=shape, y=scale,colour=difference),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='delta median' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with difference between\n distribution median and Weibull curve median")
+
+# ggsave(paste(here('output/Distance_results/outlier_analysis/'), 'parameters_withdeltamedian.png', sep=''),width=6,heigh=4)
+
+cellCountsPerFeature <- merge(all_parameters, cellCombinationCounts %>% dplyr::select(c(unique_sample, n_from, n_to)), by='unique_sample', all.x=T)
+totalCounts <- cellCounts %>% group_by(tnumber) %>% dplyr::summarise(sum = sum(n))
+cellCountsPerFeature <- merge(cellCountsPerFeature, totalCounts, by='tnumber') %>% mutate(proportional_nfrom = (n_from/sum)*100) %>% mutate(proportional_nto = (n_to/sum)*100)
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(threshold = ifelse(n_from >= 20 & n_to >= 5, T, F))
+cellCountsPerFeature <- merge(cellCountsPerFeature, medians %>% select(c(unique_sample, median_observations)), by= 'unique_sample')
+
+g1 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(n_from), aes(x=shape, y=scale,colour=n_from),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='reference\n cell count' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+g2 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(proportional_nfrom), aes(x=shape, y=scale,colour=proportional_nfrom),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='reference\n cell proportion' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+
+g3 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(n_to), aes(x=shape, y=scale,colour=n_to),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='target\n cell count' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+g4 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(proportional_nto), aes(x=shape, y=scale,colour=proportional_nto),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='target cell\n proportion' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+
+p <- addLabelToGrid(plot_grid(g1,g2,g3,g4, nrow=2), 'Original Parameters')
+# save_plot(here('output/Distance_results/curveSpace_analysis/parameterSpace_withCellCounts.png'),p, base_width=10, base_height=7)
+
+
+ggplot() +
+  geom_point(data =cellCountsPerFeature %>% arrange(median_observations), aes(x=shape, y=scale,colour=median_observations),size=0.5, alpha=0.5) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='median' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with median")
+
+ggsave(here('output/Distance_results/curveSpace_analysis/parameterSpace_withMedians.png'),width=6,height=4)
+```
+
+## Combination and sample outliers
+
+```{r}
+ggplot() +
+  geom_point(data = all_parameters, aes(x=shape, y=scale),color='black', alpha=0.1, size=0.5) +
+  geom_point(data = means, aes(x=mean_shape, y=mean_scale),color='red',alpha = 0.5, size=1) +
+  geom_text(data= means %>% filter((mean_shape > mean(means$mean_shape) + 2*sd(means$mean_shape)) | (mean_shape < mean(means$mean_shape) - 2*sd(means$mean_shape)) | mean_scale > mean(means$mean_scale) + 2*sd(means$mean_scale) | (mean_scale < mean(means$mean_scale) - 2*sd(means$mean_scale))), aes(x=mean_shape,y=mean_scale,label=paste(phenotype_from, phenotype_to, sep='_to_')),color='red',size=2) +
+  theme_bw() +
+  labs(color=NULL) + 
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("METABRIC and combination means")  + 
+  guides(colour = guide_legend(override.aes = list(size=10)))
+
+# ggsave(paste(here('output/Distance_results/curveSpace_analysis/'), 'parameters_withCombinationMeans.png', sep=''),width=6,height=4)
+
+print(means %>% filter((mean_shape > mean(means$mean_shape) + 2*sd(means$mean_shape)) | (mean_shape < mean(means$mean_shape) - 2*sd(means$mean_shape)) | mean_scale > mean(means$mean_scale) + 2*sd(means$mean_scale) | (mean_scale < mean(means$mean_scale) - 2*sd(means$mean_scale))))
+
+ggplot() +
+  geom_point(data = all_parameters, aes(x=shape, y=scale),color='black', alpha=0.1, size=0.5) +
+  geom_point(data = means_images, aes(x=mean_shape, y=mean_scale),color='red',alpha = 0.5, size=1) +
+  geom_text(data= means_images %>% filter((mean_shape > mean(means_images$mean_shape) + 2*sd(means_images$mean_shape)) | (mean_shape < mean(means_images$mean_shape) - 2*sd(means_images$mean_shape)) | (mean_scale > mean(means_images$mean_scale) + 2*sd(means_images$mean_scale) | (mean_scale < mean(means_images$mean_scale) - 2*sd(means_images$mean_scale)))), aes(x=mean_shape,y=mean_scale,label=tnumber),color='red',size=4) +
+  theme_bw() +
+  # labs(color=NULL) + 
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("METABRIC and sample means")
+  # guides(colour = guide_legend(override.aes = list(size=10)))
+
+# ggsave(paste(here('output/Distance_results/curveSpace_analysis/'), 'parameters_withSampleMeans.png', sep=''),width=6,height=4)
+
+
+print(means_images %>% filter((mean_shape > mean(means_images$mean_shape) + 2*sd(means_images$mean_shape)) | (mean_shape < mean(means_images$mean_shape) - 2*sd(means_images$mean_shape)) | (mean_scale > mean(means_images$mean_scale) + 2*sd(means_images$mean_scale) | (mean_scale < mean(means_images$mean_scale) - 2*sd(means_images$mean_scale)))))
+
+slide_outlierSamples <- sample(means_images %>% filter((mean_shape > mean(means_images$mean_shape) + 2*sd(means_images$mean_shape)) | (mean_shape < mean(means_images$mean_shape) - 2*sd(means_images$mean_shape)) | (mean_scale > mean(means_images$mean_scale) + 2*sd(means_images$mean_scale) | (mean_scale < mean(means_images$mean_scale) - 2*sd(means_images$mean_scale)))) %>% pull(tnumber), 5)
+
+for (i in slide_outlierSamples){
+  print(show_slide(i, ''))
+
+}
+
+```
+The combination outliers are dominated by rare cell types such as CD15+ and CD57+.
+The image outliers seem to have a low total cell count and there are only a few cell types present. This makes sense because the few combinations that exist in these outliers change the global median.
+
+
+## Curve explanation
+Explain regions of the curve.
+
+```{r}
+all_parameters_withoutOutliers <- cellCountsPerFeature %>% filter(!(unique_sample %in% outliers))  %>% filter(!(unique_sample %in% below_threshold))
+n = 40
+
+# Pick extremes
+# Divide the curve in areas and pick random from these areas
+bottom_right <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape > 5) %>% filter(scale < 20),1) %>% mutate(type= "low scale, high shape")
+bottom_left <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 2.5) %>% filter(shape >2) %>% filter(scale < 15),1)%>% mutate(type= "low scale, low shape")
+mid_right <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape > 2.8) %>% filter(shape <3.5) %>% filter(scale > 200) %>% filter(scale < 300) ,1)%>% mutate(type= "high scale, high shape")
+mid_left <- sample_n(all_parameters_withoutOutliers  %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 1) %>% filter(scale > 100)%>% filter(scale < 120),1 )%>% mutate(type= "high scale, low shape")
+belly <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 2.8) %>% filter(shape > 2.6) %>% filter(scale > 80) %>% filter(scale <90),1)%>% mutate(type= "belly")
+
+sample_points <- rbind(bottom_right, bottom_left,mid_right, mid_left, belly)
+print(sample_points$phenotype_combo)
+stopifnot(nrow(sample_points) ==5)
+
+ggplot() +
+  geom_point(data = all_parameters_withoutOutliers, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  geom_point(data = sample_points, aes(x=shape, y=scale, color=type), alpha=1, size=3) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+# ggsave(paste(here('output/Distance_results/Alberto_reproduction/'), 'extremeparameters.pdf', sep=''), width=6, height=4)
+
+```
+
+```{r}
+ggplot() + 
+  stat_function(fun = dweibull, args = list(shape = bottom_right$shape, scale = bottom_right$scale), aes(colour='low scale, high shape')) +
+  stat_function(fun = dweibull, args = list(shape = bottom_left$shape, scale = bottom_left$scale),aes(colour='low scale, low shape')) +
+  stat_function(fun = dweibull, args = list(shape = mid_left$shape, scale = mid_left$scale), aes(colour='high scale, low scale')) +
+  stat_function(fun = dweibull, args = list(shape = mid_right$shape, scale = mid_right$scale), aes(colour='high scale, high scale')) +
+  stat_function(fun = dweibull, args = list(shape = belly$shape, scale = belly$scale),aes(colour='belly')) + ylim(0,0.2) +
+  xlim(0,600) + theme_bw() + xlab('micron') + ylab('N')
+
+# ggsave(paste(here('output/Distance_results/Alberto_reproduction/'), 'weibullcurves.pdf', sep=''),width=10, height=4)
+
+```
+
+```{r}
+sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample_points$tnumber) %>% filter(phenotype_combo %in% sample_points$phenotype_combo),
+                              y = sample_points %>% dplyr::select(c(phenotype_combo, shape, scale, type)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo') 
+
+for (row in 1:nrow(sample_points)){
+  slide <- show_distance_distribution(cells, all_distances_data, sample_points[row,],0.2)
+  title <- paste(sample_points[row,]['type'][[1]], '(shape:', round(sample_points[row,]['shape'][[1]],2), 'scale:',round(sample_points[row,]['scale'][[1]],2), ')')
+  slideWithTitle <- addLabelToGrid(slide, title)
+  print(slideWithTitle)
+  # ggsave(here(paste('output/Distance_results/Alberto_reproduction/estimated_sample',row, '.pdf', sep='')),slideWithTitle, width=10, height=4)
+}
+```
+
+## Outliers
+It looks like many outliers are based on low counts.
+
+```{r}
+print(length(intersect(below_threshold,outliers_original))/length(outliers_original))
+
+```
+About 45% is caused by low cell counts.
+
+```{r}
+sample_outliers <- sample_n(outliers_points %>% filter(!(unique_sample %in% below_threshold)) %>% filter(shape < 2),1)
+for (i in 1:7){
+  outlier <- sample_n(outliers_points  %>% filter(!(unique_sample %in% below_threshold))  %>% filter(shape < sample_outliers[i,'shape']+0.55) %>% filter(shape > sample_outliers[i,'shape']+0.45),1)
+  sample_outliers <- rbind(sample_outliers, outlier)
+}
+
+ggplot() +
+  geom_point(data = all_parameters, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  geom_point(data = sample_outliers, aes(x=shape, y=scale),colour='red', alpha=1, size=3) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+# ggsave(here('output/Distance_results/outlier_analysis/outlierline.png'), width=6, height=4)
+
+sample_outliers_withDistanceDifference <- merge(sample_outliers, medians %>% dplyr::select(c(unique_sample, difference,median_observations, median_weibull)), by='unique_sample', all.x=T)
+
+show_distance_distribution_outliers <- function(sample, ylimit=0.02){
+  sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% sample$tnumber) %>% filter(phenotype_combo %in%
+                                                                                                            sample$phenotype_combo),
+                                y = sample %>% dplyr::select(c(phenotype_combo, shape, scale)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+  median_obs <- sample['median_observations'][[1]]
+  median_wb <- sample['median_weibull'][[1]]
+  
+  dist <- ggplot(data= sample_distance_data %>% filter(tnumber == sample['tnumber'][[1]]) %>% filter(phenotype_combo == sample['phenotype_combo'][[1]])) + geom_bar(aes(x=distance_window, y=N.per.mm2.scaled), stat="identity",alpha=0.5, color="#00BFC4") + geom_vline(xintercept = median_obs, color="#00BFC4", linetype = "longdash")  + geom_vline(xintercept = median_wb, color='#F8766D', linetype = "longdash") +
+    stat_function(fun = dweibull, args = list(shape = sample['shape'][[1]], scale = sample['scale'][[1]]), color='#F8766D')+
+    xlim(0,600) + ylim(0,ylimit) + theme_bw() + theme(legend.position = "none") + ggtitle(label = sample['phenotype_combo'][[1]])
+  
+  slide <- ggplot(data=cells%>% filter(ImageNumber == sample['tnumber'][[1]]) %>% 
+                    filter(meta_description == sample['phenotype_from'][[1]] | meta_description == sample['phenotype_to'][[1]])) + 
+    geom_point(aes(x=Location_Center_X, y=Location_Center_Y, color=meta_description), alpha =0.5) + 
+    theme_bw() + ggtitle(paste('imagenumber: ', sample['tnumber'][[1]]))
+  
+  return(plot_grid(dist, slide,ncol=2))
+  
+}
+
+for (row in 1:nrow(sample_outliers_withDistanceDifference)){
+  slide <- show_distance_distribution_outliers(sample_outliers_withDistanceDifference[row,],0.05)
+  title <- paste('Outlier with delta difference:' , round(sample_outliers_withDistanceDifference[row,]['difference'][[1]],2), '\n(shape:', round(sample_outliers_withDistanceDifference[row,]['shape'][[1]],2), 'scale:',round(sample_outliers_withDistanceDifference[row,]['scale'][[1]],2), ')')
+  slideWithTitle <- addLabelToGrid(slide, title)
+  # ggsave(here(paste('output/Distance_results/outlier_analysis/outlier_sample',row, '.pdf', sep='')),slideWithTitle, width=10, height=4)
+}
+
+```
+
+## Belly points
+Take a better look at the belly points.
+
+```{r}
+belly_points <- sample_n(all_parameters_withoutOutliers %>% filter(shape < 1.1) %>% filter(shape > 1) %>% filter(scale > 60) %>% filter(scale <61),1)
+for (i in 1:7){
+  belly <- sample_n(all_parameters_withoutOutliers %>% filter(shape < belly_points[i,'shape']+0.35) %>% filter(shape > belly_points[i,'shape']+0.25) %>% filter(scale > 60) %>% filter(scale <61),1)
+  belly_points <- rbind(belly_points, belly)
+}
+
+ggplot() +
+  geom_point(data = all_parameters_withoutOutliers, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  geom_point(data = belly_points, aes(x=shape, y=scale),colour='red', alpha=1, size=3) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+# ggsave(here('output/Distance_results/bellyline.pdf'), width=6, height=4)
+
+
+belly_points <- belly_points %>% mutate(type = 'belly')
+
+sample_distance_data <- merge(x = all_distances_data %>% filter(tnumber %in% belly_points$tnumber) %>% filter(phenotype_combo %in% belly_points$phenotype_combo),
+                              y = belly_points %>% dplyr::select(c(phenotype_combo, shape, scale, type)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo')
+
+for (row in 1:nrow(belly_points)){
+  slide <- show_distance_distribution(belly_points[row,],0.025)
+  title <- paste(belly_points[row,]['type'][[1]], '(shape:', round(belly_points[row,]['shape'][[1]],2), 'scale:',round(belly_points[row,]['scale'][[1]],2), ')')
+  slideWithTitle <- addLabelToGrid(slide, title)
+  print(slideWithTitle)
+  # ggsave(paste(here('output/Distance_results/bellyline_sample'),row,'.pdf',sep=''), width=10, height=4)
+
+}
+
+```
+
+## Grid exploration
+The belly is explained by epithelial to TME cell relationships.
+
+```{r}
+plot_parameters <- function(df, cell_type, TME_types, Tumor_types){
+  point <- ggplot() +
+    geom_point(data=df  %>% filter(phenotype_to != cell_type), aes(x=shape, y=scale,colour='all'),color='grey',alpha=0.1, size=0.5) +
+    geom_point(data=df %>% filter(phenotype_to == cell_type& phenotype_from %in% TME_types), aes(x=shape, y=scale,colour=paste('from', 'TME cell type', 'to', cell_type)),alpha=0.5, size=1) +
+      geom_point(data=df %>% filter(phenotype_to == cell_type & phenotype_from %in% Tumor_types), aes(x=shape, y=scale,colour=paste('from', 'tumour cell type', 'to', cell_type)),alpha=0.5, size=1) +
+    geom_point(data=df %>% filter(phenotype_to == cell_type & phenotype_from == cell_type), aes(x=shape, y=scale,colour=paste('from', cell_type, 'to', cell_type)),alpha=0.8, size=1) +
+    ylim(10,300) + xlim(0,6) +
+    theme_bw() + scale_y_log10() +
+    xlab('Shape') + ylab('Scale') +
+    theme(legend.position='bottom', legend.direction="vertical") + ggtitle(paste('From X to ', cell_type)) + guides(colour = guide_legend(override.aes = list(size=10))) +
+  labs(color=NULL)
+
+  return(point)
+}
+
+for ( t in getTumorAndTMETypes()$TME_types){
+  img <- plot_parameters(all_parameters,t,getTumorAndTMETypes()$TME_types,getTumorAndTMETypes()$tumor_types)
+  print(img)
+  # ggsave(paste(here('output/Distance_results/Alberto_reproduction/parameters_to_'),  gsub("[[:punct:]]", "", t),'.pdf',sep=''),height=8,width = 8)
+}
+
+```
+```{r}
+for ( t in getTumorAndTMETypes()$tumor_types){
+  img <- plot_parameters(all_parameters,t, getTumorAndTMETypes()$TME_types,getTumorAndTMETypes()$tumor_types)
+  print(img)
+  # ggsave(paste(here('output/Distance_results/Alberto_reproduction/parameters_to_'),  gsub("[[:punct:]]", "", t),'.pdf',sep=''),height=8,width = 8)
+}
+
+```
+
+
+Compare this to the NABUCCO parameters.
+```{r}
+Alberto_parameters <- read_tsv(here('DATA/global_weib_coeff_oct.tsv')) %>% mutate(type='NABUCCO')
+Alberto_parameters <- Alberto_parameters %>% separate(phenotype_combo, c('phenotype_from', 'phenotype_to'), sep = '_to_') %>% rename(shape = a, scale = b)
+Alberto_TME_types <- c("CD3+","CD68+","CD8+CD3+","CD20+","CD3+FoxP3+")
+Alberto_Tumor_types <- c("PanCK+")
+
+for ( t in Alberto_TME_types){
+  img <- plot_parameters(Alberto_parameters,t, Alberto_TME_types, 
+                         Alberto_Tumor_types)
+  print(img)
+  # ggsave(paste(here('output/Distance_results/Alberto_reproduction/Albertoparameters_to_'),  gsub("[[:punct:]]", "", t),'.pdf',sep=''),height=8,width = 8)
+
+}
+
+for ( t in Alberto_Tumor_types){
+  img <- plot_parameters(Alberto_parameters,t, Alberto_TME_types, Alberto_Tumor_types)
+  print(img)
+  # ggsave(paste(here('output/Distance_results/Alberto_reproduction/Albertoparameters_to_'),  gsub("[[:punct:]]", "", t),'.pdf',sep=''),height=8,width = 8)
+
+}
+
+```
+
+We see a similar distribution in Alberto's data.
+
+We place a grid over the parameter space and measure the following propoerties in each space:
+1. mean reference cell count
+2. mean target cell count
+3. proportion >20-5
+4. proportion >20-20
+3. proportion Tumor-tumor, TME-tumor, tumor-TME, TME-TME
+4. number of points
+```{r}
+shape_lines <- c(seq(0,4.5,1.5),10)
+scale_lines <- c(0,30,100,300,500)
+
+cellCountsPerFeature <- merge(all_parameters, cellCombinationCounts %>% dplyr::select(c(unique_sample, n_from, n_to)), by='unique_sample', all.x=T)
+totalCounts <- cellCounts %>% group_by(tnumber) %>% dplyr::summarise(sum = sum(n))
+cellCountsPerFeature <- merge(cellCountsPerFeature, totalCounts, by='tnumber') %>% mutate(proportional_nfrom = (n_from/sum)*100) %>% mutate(proportional_nto = (n_to/sum)*100)
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(threshold = ifelse(n_from >= 20 & n_to >= 5, T, F))
+cellCountsPerFeature <- merge(cellCountsPerFeature, medians %>% select(c(unique_sample, median_observations)), by= 'unique_sample')
+
+ggplot() +
+  geom_point(data = all_parameters, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  # ylim(10,300) + xlim(0,6) +
+    theme_bw() +
+  scale_y_log10() +
+  scale_x_continuous(breaks = shape_lines) +
+  xlab('Shape') + ylab('Scale')  + 
+  theme(panel.grid.major = element_line(color = "red",
+                                        size = 0.5,
+                                        linetype = 2))
+
+
+tumor_types <- c("CK^{med}ER^{lo}","ER^{hi}CXCL12^{+}", "CK8-18^{hi}CXCL12^{hi}",  "CK^{+} CXCL12^{+}", "CK8-18^{hi}ER^{lo}", "CK8-18^{+} ER^{hi}","HER2^{+}" ,"Basal","CD15^{+}", "Ep CD57^{+}")
+
+
+resultDF = tibble(matrix(nrow=0, ncol=14))
+for (sh in 1:(length(shape_lines)-1)){
+  for(sc in 1:(length(scale_lines)-1)){
+    print(paste(sh,sc))
+    subset <- cellCountsPerFeature %>% filter(shape >= shape_lines[[sh]] & shape < shape_lines[[sh+1]]) %>% filter(scale >= scale_lines[[sc]] & scale < scale_lines[[sc+1]])
+    
+    result <- list(q = paste(sh, sc,sep='_'),
+                   size = nrow(subset),
+                   mean_ref = mean(subset %>% pull(n_from)), 
+                   mean_refprop = mean(subset %>% pull(proportional_nfrom)), 
+                   mean_target = mean(subset %>% pull(n_to)), 
+                   mean_targetprop = mean(subset %>% pull(proportional_nto)), 
+                   twentyfive = 100*nrow(subset %>% filter(n_from > 20 & n_to > 5))/nrow(subset), 
+                   twentytwenty = 100*nrow(subset %>% filter(n_from > 20 & n_to > 20))/nrow(subset),
+                   epithelial_epithelial = 100*nrow(subset %>% filter(phenotype_from %in% getTumorAndTMETypes()$tumor_types & phenotype_to %in% getTumorAndTMETypes()$tumor_types))/nrow(subset),
+                   TME_epithelial = 100*nrow(subset %>% filter(phenotype_from %in% getTumorAndTMETypes()$TME_types & phenotype_to %in% getTumorAndTMETypes()$tumor_types))/nrow(subset),
+                  epithelial_TME = 100*nrow(subset %>% filter(phenotype_from %in% getTumorAndTMETypes()$tumor_types & phenotype_to %in% getTumorAndTMETypes()$TME_types))/nrow(subset),
+                   TME_TME = 100*nrow(subset %>% filter(phenotype_from %in% getTumorAndTMETypes()$TME_types & phenotype_to %in% getTumorAndTMETypes()$TME_types))/nrow(subset),
+                  tumor_TME = 100*nrow(subset %>% filter(phenotype_from %in% tumor_types & phenotype_to %in% getTumorAndTMETypes()$TME_types))/nrow(subset),
+                  TME_tumor=100*nrow(subset %>% filter(phenotype_from %in% getTumorAndTMETypes()$TME_types & phenotype_to %in% tumor_types))/nrow(subset),
+                  tumor_tumor=100*nrow(subset %>% filter(phenotype_from %in% tumor_types & phenotype_to %in% tumor_types))/nrow(subset)
+                   )
+    resultDF <- rbind(resultDF,result)
+  
+  }
+}
+
+resultDF <- resultDF %>% separate(q, c('shape', 'scale'),sep = '_')
+resultDF$shape <- as.numeric(resultDF$shape)
+resultDF$scale <- as.numeric(resultDF$scale)
+
+
+```
+
+```{r}
+shape_lines <- c(seq(0,4.5,1.5),10)
+scale_lines <- c(0,30,100,300,500)
+
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(shape_q = ifelse(shape < 1.5, 1, ifelse(shape < 3, 2, ifelse(shape <4.5, 3, ifelse(shape <10, 4, NA)))))
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(scale_q = ifelse(scale < 30, 1, ifelse(scale < 100, 2, ifelse(scale <300, 3, ifelse(scale < 500, 4, NA)))))
+
+cellCountsPerFeature <- merge(cellCountsPerFeature, resultDF, by.x=c('shape_q','scale_q'), by.y=c('shape', 'scale'))
+
+g1 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=epithelial_epithelial),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='epithelial-epithelial\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of epithelial to epithelial combinations ")
+
+g2 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=epithelial_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='epithelial-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of epithelial to TME combinations ")
+
+g3 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_epithelial),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-epithelial\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to epithelial combinations ")
+
+g4 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to TME combinations ")
+
+g5 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=tumor_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='tumor-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of tumor to TME combinations ")
+
+g6 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_tumor),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-tumor\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to tumor combinations ")
+
+g7 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=tumor_tumor),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='tumor-tumor\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of tumor to tumor combinations ")
+
+
+p <- addLabelToGrid(plot_grid(g1,g2,g3,g4,g5,g6,g7, nrow=4), 'Original parameters of TME and tumor relationships')
+# save_plot(here('output/Distance_results/curveSpace_analysis/parameterSpace_tumorTME.png'),p, base_width=10, base_height=15)
+
+
+```
+
+## Alternative classification
+Make same plots for new parameters.
+
+```{r}
+mediansAlt <- read_rds(here('scratch/mediansAlt.rds'))
+cellCountsPerFeature <- merge(all_parametersAlt, cellCombinationCountsAlt %>% dplyr::select(c(unique_sample, n_from, n_to)), by='unique_sample', all.x=T)
+totalCounts <- cellCountsAlt %>% group_by(tnumber) %>% dplyr::summarise(sum = sum(n))
+cellCountsPerFeature <- merge(cellCountsPerFeature, totalCounts, by='tnumber') %>% mutate(proportional_nfrom = (n_from/sum)*100) %>% mutate(proportional_nto = (n_to/sum)*100)
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(threshold = ifelse(n_from >= 20 & n_to >= 5, T, F))
+cellCountsPerFeature <- merge(cellCountsPerFeature, mediansAlt %>% dplyr::select(c(unique_sample, median_observations)), by= 'unique_sample')
+
+outliersAlt <- read_rds(here('scratch/outlier_parametersAlt.rds')) %>% pull(unique_sample)
+below_thresholdAlt <- cellCombinationCountsAlt %>% filter(n_from < 20 | n_to < 5) %>% pull(unique_sample)
+
+g1 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(n_from), aes(x=shape, y=scale,colour=n_from),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='reference\n cell count' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with reference cell counts")
+
+g2 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(proportional_nfrom), aes(x=shape, y=scale,colour=proportional_nfrom),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='reference\n cell proportion' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with refence cell proportions")
+
+
+g3 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(n_to), aes(x=shape, y=scale,colour=n_to),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='target\n cell count' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with target cell counts")
+
+g4 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% arrange(proportional_nto), aes(x=shape, y=scale,colour=proportional_nto),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='target\n cell proportion' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with target cell proportions")
+
+g5 <- ggplot() +
+  geom_point(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale),color='black',size=0.5, alpha=0.1) + geom_density_2d(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale), color='blue') +  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters")
+
+g6 <- ggplot() +
+  geom_point(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)) %>% arrange(median_observations), aes(x=shape, y=scale,colour=median_observations),size=0.5, alpha=0.5) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='median' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters with median")
+ggsave(here('output/Distance_results/alternative_classification/parameterSpace_withMedians.png'),plot_grid(g5,g6,nrow=1,rel_widths = c(0.85,1)),width=10,height=4)
+
+p <- addLabelToGrid(plot_grid(g1,g2,g3,g4, nrow=2), 'Alternative Parameters')
+save_plot(here('output/Distance_results/alternative_classification/parameterSpace_withCellCounts.png'),p, base_width=10, base_height=7)
+
+Alberto_parameters <- read_tsv(here('DATA/global_weib_coeff_oct.tsv')) %>% mutate(type='NABUCCO')
+Alberto_parameters <- Alberto_parameters %>% separate(phenotype_combo, c('phenotype_from', 'phenotype_to'), sep = '_to_') %>% rename(shape = a, scale = b)
+
+g1 <- ggplot() +
+  geom_point(data =cellCountsPerFeature  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale),size=0.5, alpha=0.1) +
+  # geom_density_2d(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale), color='blue') +
+    theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+
+g2 <- ggplot() +
+  geom_point(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale),size=0.5, alpha=0.1) +
+    geom_point(data =cellCountsPerFeature %>% filter((unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale,color='outlier'),size=0.5, alpha=1) +
+  # geom_density_2d(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale), color='blue') +
+    theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position="bottom")
+
+
+g3 <- ggplot() +
+  geom_point(data =cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt)), aes(x=shape, y=scale,colour='METABRIC'),size=0.5, alpha=0.1) +
+  geom_point(data =Alberto_parameters, aes(x=shape, y=scale,colour='NABUCCO'),size=0.5, alpha=1) +
+    theme_bw() +
+  scale_colour_manual(values=c("black","#F8766D" )) +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + guides(colour = guide_legend(override.aes = list(size=10))) + theme(legend.position="bottom")
+
+allPlots <- plot_grid(g1,g2,g3, nrow = 1)
+
+ggsave(here('output/final_figures//parametersNABUCCOMETABRIC_legend.png'),width=18,height=6)
+```
+
+
+```{r}
+ggplot() +
+  geom_point(data = all_parametersAlt, aes(x=shape, y=scale),color='black', alpha=0.1, size=0.5) +
+  geom_point(data = means_combinationsAlt, aes(x=mean_shape, y=mean_scale),color='red',alpha = 0.5, size=1) +
+  geom_text(data= means_combinationsAlt %>% filter((mean_shape > mean(means_combinationsAlt$mean_shape) + 2*sd(means_combinationsAlt$mean_shape)) | (mean_shape < mean(means_combinationsAlt$mean_shape) - 2*sd(means_combinationsAlt$mean_shape)) | mean_scale > mean(means_combinationsAlt$mean_scale) + 2*sd(means_combinationsAlt$mean_scale) | (mean_scale < mean(means_combinationsAlt$mean_scale) - 2*sd(means_combinationsAlt$mean_scale))), aes(x=mean_shape,y=mean_scale,label=paste(phenotype_from, phenotype_to, sep='_to_')),color='red',size=2) +  theme_bw() +
+  labs(color=NULL) + 
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("METABRIC and combination means")  + 
+  guides(colour = guide_legend(override.aes = list(size=10)))
+
+ggsave(paste(here('output/Distance_results/alternative_classification/'), 'parameters_withCombinationMeansAlt.png', sep=''),width=6,height=4)
+
+print(means_combinationsAlt %>% filter((mean_shape > mean(means_combinationsAlt$mean_shape) + 2*sd(means_combinationsAlt$mean_shape)) | (mean_shape < mean(means_combinationsAlt$mean_shape) - 2*sd(means_combinationsAlt$mean_shape)) | mean_scale > mean(means_combinationsAlt$mean_scale) + 2*sd(means_combinationsAlt$mean_scale) | (mean_scale < mean(means_combinationsAlt$mean_scale) - 2*sd(means_combinationsAlt$mean_scale))))
+
+ggplot() +
+  geom_point(data = all_parametersAlt, aes(x=shape, y=scale),color='black', alpha=0.1, size=0.5) +
+  geom_point(data = means_imagesAlt, aes(x=mean_shape, y=mean_scale),color='red',alpha = 0.5, size=1) +
+  geom_text(data= means_imagesAlt %>% filter((mean_shape > mean(means_imagesAlt$mean_shape) + 2*sd(means_imagesAlt$mean_shape)) | (mean_shape < mean(means_imagesAlt$mean_shape) - 2*sd(means_imagesAlt$mean_shape)) | (mean_scale > mean(means_imagesAlt$mean_scale) + 2*sd(means_imagesAlt$mean_scale) | (mean_scale < mean(means_imagesAlt$mean_scale) - 2*sd(means_imagesAlt$mean_scale)))), aes(x=mean_shape,y=mean_scale,label=tnumber),color='red',size=4,position = position_dodge(width = .9)) +
+  theme_bw() +
+  # labs(color=NULL) + 
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("METABRIC and sample means")
+  # guides(colour = guide_legend(override.aes = list(size=10)))
+
+ggsave(paste(here('output/Distance_results/alternative_classification/'), 'parameters_withSampleMeansAlt.png', sep=''),width=6,height=4)
+
+
+slide_outlierSamples <- sample(means_imagesAlt %>% filter((mean_shape > mean(means_imagesAlt$mean_shape) + 2*sd(means_imagesAlt$mean_shape)) | (mean_shape < mean(means_imagesAlt$mean_shape) - 2*sd(means_imagesAlt$mean_shape)) | (mean_scale > mean(means_imagesAlt$mean_scale) + 2*sd(means_imagesAlt$mean_scale) | (mean_scale < mean(means_imagesAlt$mean_scale) - 2*sd(means_imagesAlt$mean_scale)))) %>% pull(tnumber),5)
+
+for (i in slide_outlierSamples){
+  print(show_slide(i, ''))
+}
+```
+CK+_ERorHER2+_cells or CD57+_cells are in all outliers combinations.
+The image outliers seem to have a low total cell count. This makes sense because the few combinations that exist in these outliers change the global median.
+
+```{r}
+shape_lines <- c(0,1.5,2.5,4.5,10)
+scale_lines <- c(0,30,100,300,500)
+
+ggplot() +
+  geom_point(data = all_parametersAlt, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  # ylim(10,300) + xlim(0,6) +
+    theme_bw() +
+  scale_y_log10() +
+  scale_x_continuous(breaks = shape_lines) +
+  xlab('Shape') + ylab('Scale')  + 
+  theme(panel.grid.major = element_line(color = "red",
+                                        size = 0.5,
+                                        linetype = 2))
+
+
+epithelial_types <- c("CKmed_ERorHER2-_cells", "CK+_ERorHER2+_cells" , "CK+_ERorHER2-_cells","CK-_cells","CK-MHC+_cells" )
+tumor_types <- c("CKmed_ERorHER2-_cells", "CK+_ERorHER2+_cells" , "CK+_ERorHER2-_cells")
+TME_types <- setdiff(unique(cellsAlt$meta_description), epithelial_types)
+
+
+resultDF = tibble(matrix(nrow=0, ncol=12))
+for (sh in 1:(length(shape_lines)-1)){
+  for(sc in 1:(length(scale_lines)-1)){
+    print(paste(sh,sc))
+    subset <- cellCountsPerFeature %>% filter(shape >= shape_lines[[sh]] & shape < shape_lines[[sh+1]]) %>% filter(scale >= scale_lines[[sc]] & scale < scale_lines[[sc+1]])
+    print(nrow(subset))
+    result <- list(q = paste(sh, sc,sep='_'),
+                   size = nrow(subset),
+                   mean_ref = mean(subset %>% pull(n_from)), 
+                   mean_refprop = mean(subset %>% pull(proportional_nfrom)), 
+                   mean_target = mean(subset %>% pull(n_to)), 
+                   mean_targetprop = mean(subset %>% pull(proportional_nto)), 
+                   twentyfive = 100*nrow(subset %>% filter(n_from > 20 & n_to > 5))/nrow(subset), 
+                   twentytwenty = 100*nrow(subset %>% filter(n_from > 20 & n_to > 20))/nrow(subset),
+                   epithelial_epithelial = 100*nrow(subset %>% filter(phenotype_from %in% epithelial_types & phenotype_to %in% epithelial_types))/nrow(subset),
+                   TME_epithelial = 100*nrow(subset %>% filter(phenotype_from %in% TME_types & phenotype_to %in% epithelial_types))/nrow(subset),
+                    epithelial_TME = 100*nrow(subset %>% filter(phenotype_from %in% epithelial_types& phenotype_to %in% TME_types))/nrow(subset),
+                   TME_TME = 100*nrow(subset %>% filter(phenotype_from %in% TME_types & phenotype_to %in% TME_types))/nrow(subset),
+                   tumor_TME = 100*nrow(subset %>% filter(phenotype_from %in% tumor_types & phenotype_to %in% TME_types))/nrow(subset),
+                   TME_tumor = 100*nrow(subset %>% filter(phenotype_from %in% TME_types & phenotype_to %in% tumor_types))/nrow(subset),
+                   tumor_tumor = 100*nrow(subset %>% filter(phenotype_from %in% tumor_types & phenotype_to %in% tumor_types))/nrow(subset)
+                   )
+    resultDF <- rbind(resultDF,result)
+  
+  }
+}
+
+resultDF <- resultDF %>% separate(q, c('shape', 'scale'),sep = '_')
+resultDF$shape <- as.numeric(resultDF$shape)
+resultDF$scale <- as.numeric(resultDF$scale)
+
+
+```
+
+```{r}
+cellCountsPerFeature <- merge(all_parametersAlt, cellCombinationCountsAlt %>% dplyr::select(c(unique_sample, n_from, n_to)), by='unique_sample', all.x=T)
+totalCounts <- cellCountsAlt %>% group_by(tnumber) %>% dplyr::summarise(sum = sum(n))
+cellCountsPerFeature <- merge(cellCountsPerFeature, totalCounts, by='tnumber') %>% mutate(proportional_nfrom = (n_from/sum)*100) %>% mutate(proportional_nto = (n_to/sum)*100)
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(threshold = ifelse(n_from >= 20 & n_to >= 5, T, F))
+cellCountsPerFeature <- merge(cellCountsPerFeature, mediansAlt %>% select(c(unique_sample, median_observations)), by= 'unique_sample')
+
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(shape_q = ifelse(shape < 1.5, 1, ifelse(shape < 2.5, 2, ifelse(shape <4.5, 3, ifelse(shape <10, 4, NA)))))
+cellCountsPerFeature <- cellCountsPerFeature %>% mutate(scale_q = ifelse(scale < 30, 1, ifelse(scale < 100, 2, ifelse(scale <300, 3, ifelse(scale < 500, 4, NA)))))
+
+cellCountsPerFeature <- merge(cellCountsPerFeature, resultDF, by.x=c('shape_q','scale_q'), by.y=c('shape', 'scale'))
+
+g1 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=epithelial_epithelial),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='epithelial-epithelial\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of epithelial to epithelial combinations ")
+
+g2 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=epithelial_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='epithelial-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of epithelial to TME combinations ")
+
+g3 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_epithelial),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-epithelial\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to epithelial combinations ")
+
+g4 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to TME combinations ")
+
+g5 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=tumor_TME),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='tumor-TME\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of tumor to TME combinations ")
+
+g6 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=TME_tumor),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='TME-tumor\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of TME to tumor combinations ")
+
+g7 <- ggplot() +
+  geom_point(data =cellCountsPerFeature, aes(x=shape, y=scale,colour=tumor_tumor),size=0.5, alpha=1) +
+  scale_colour_continuous() +
+  scale_colour_gradient2(low="white", high="red", space ="Lab", name='tumor-tumor\n percentage' ) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale') + ggtitle("Parameters of tumor to tumor combinations ")
+
+
+p <- addLabelToGrid(plot_grid(g4,g5,g6,g7, ncol=2), 'alternative parameters of TME and tumor relationships')
+save_plot(here('output/Distance_results/alternative_classification/parameterSpace_tumorTME.png'),p, base_width=10, base_height=8)
+
+
+```
+
+```{r}
+phenotype_to_means <- all_parameters %>% group_by(phenotype_to) %>% summarise(shape_mean = mean(shape), scale_mean = mean(scale))
+phenotype_from_means <- all_parameters %>% group_by(phenotype_from) %>% summarise(shape_mean = mean(shape), scale_mean = mean(scale))
+
+ggplot() +
+  geom_point(data=all_parameters, aes(x=shape,y=scale), colour='grey', alpha=0.5, size=0.5) +
+  geom_point(data=phenotype_to_means %>% filter(phenotype_to %in% getTumorAndTMETypes()$TME_types), aes(x=shape_mean, y=scale_mean, colour=phenotype_to))+
+  ylim(10,300) + xlim(0,6) +
+    theme_bw() + scale_y_log10() +
+    xlab('Shape') + ylab('Scale')
+```
+```{r}
+phenotype_to_meansAlt <- all_parametersAlt %>% group_by(phenotype_to) %>% summarise(shape_mean = mean(shape), scale_mean = mean(scale))
+phenotype_from_meansAlt <- all_parametersAlt %>% group_by(phenotype_from) %>% summarise(shape_mean = mean(shape), scale_mean = mean(scale))
+
+ggplot() +
+  geom_point(data=all_parametersAlt, aes(x=shape,y=scale), colour='grey', alpha=0.5, size=0.5) +
+  geom_point(data=phenotype_to_meansAlt %>% filter(phenotype_to %in% epithelial_types), aes(x=shape_mean, y=scale_mean, colour=phenotype_to))+
+  ylim(10,300) + xlim(0,6) +
+    theme_bw() + scale_y_log10() +
+    xlab('Shape') + ylab('Scale')
+```
+
+## Curve explanation
+Explain regions of the curve.
+
+```{r}
+outliersAlt <- read_rds(here('scratch/outlier_parametersAlt.rds')) %>% pull(unique_sample)
+below_thresholdAlt <- cellCombinationCountsAlt %>% filter(n_from < 20 | n_to < 5) %>% pull(unique_sample)
+
+all_parameters_withoutOutliers <- cellCountsPerFeature %>% filter(!(unique_sample %in% outliersAlt))  %>% filter(!(unique_sample %in% below_thresholdAlt))
+n = 40
+
+# Pick extremes
+# Divide the curve in areas and pick random from these areas
+bottom_right <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape > 5) %>% filter(scale < 20),1) %>% mutate(type= "low scale, high shape")
+bottom_left <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 2.5) %>% filter(shape >2) %>% filter(scale < 15),1)%>% mutate(type= "low scale, low shape")
+mid_right <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape > 2.8) %>% filter(shape <3.5) %>% filter(scale > 200) %>% filter(scale < 300) ,1)%>% mutate(type= "high scale, high shape")
+mid_left <- sample_n(all_parameters_withoutOutliers  %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 1.5) %>% filter(scale > 100)%>% filter(scale < 120),1 )%>% mutate(type= "high scale, low shape")
+belly <- sample_n(all_parameters_withoutOutliers %>% filter(n_from > n & n_to > n) %>% filter(phenotype_from != phenotype_to) %>% filter(shape < 2.8) %>% filter(shape > 2.6) %>% filter(scale > 80) %>% filter(scale <90),1)%>% mutate(type= "belly")
+
+sample_points <- rbind(bottom_right, bottom_left,mid_right, mid_left, belly)
+print(sample_points$phenotype_combo)
+stopifnot(nrow(sample_points) ==5)
+
+ggplot() +
+  geom_point(data = all_parameters_withoutOutliers, aes(x=shape, y=scale), alpha=0.1, size=0.5) +
+  geom_point(data = sample_points, aes(x=shape, y=scale, color=type), alpha=1, size=3) +
+  theme_bw() +
+  ylim(10,300) + xlim(0,6) +
+  scale_y_log10() +
+  xlab('Shape') + ylab('Scale')
+
+ggsave(paste(here('output/Distance_results/Alberto_reproduction/'), 'extremeparameters.pdf', sep=''), width=6, height=4)
+
+```
+
+```{r}
+ggplot() + 
+  stat_function(fun = dweibull, args = list(shape = bottom_right$shape, scale = bottom_right$scale), aes(colour='low scale, high shape')) +
+  stat_function(fun = dweibull, args = list(shape = bottom_left$shape, scale = bottom_left$scale),aes(colour='low scale, low shape')) +
+  stat_function(fun = dweibull, args = list(shape = mid_left$shape, scale = mid_left$scale), aes(colour='high scale, low scale')) +
+  stat_function(fun = dweibull, args = list(shape = mid_right$shape, scale = mid_right$scale), aes(colour='high scale, high scale')) +
+  stat_function(fun = dweibull, args = list(shape = belly$shape, scale = belly$scale),aes(colour='belly')) + ylim(0,0.2) +
+  xlim(0,600) + theme_bw() + xlab('micron') + ylab('N')
+
+ggsave(paste(here('output/Distance_results/Alberto_reproduction/'), 'weibullcurves.pdf', sep=''),width=10, height=4)
+
+```
+
+```{r}
+sample_distance_data <- merge(x = all_distances_dataAlt %>% filter(tnumber %in% sample_points$tnumber) %>% filter(phenotype_combo %in% sample_points$phenotype_combo),
+                              y = sample_points %>% dplyr::select(c(phenotype_combo, shape, scale, type)), all.X =T, by.x='phenotype_combo', by.y='phenotype_combo') 
+
+for (row in 1:nrow(sample_points)){
+  slide <- show_distance_distribution(cellsAlt, all_distances_dataAlt, sample_points[row,],0.2)
+  slideWithTitle <- addLabelToGrid(slide, title)
+  print(slideWithTitle)
+  ggsave(here(paste('output/Distance_results/Alberto_reproduction/estimated_sample',row, '.pdf', sep='')),slideWithTitle, width=10, height=4)
+}
+```
+
+## X to Celltype parameters
+
+Now look at specific 'X to celltype' parameters
+
+```{r plot subset}
+plot_parameters <- function(combi){
+  point <- all_parameters %>%
+    filter(phenotype_to == combi) %>%
+    filter(phenotype_from %in% six_combinations) %>%
+    ggplot(aes(x=shape, y=scale, color=phenotype_from)) +
+    geom_point(alpha=0.4, size=1) +
+    ylim(10,300) + xlim(0,6) +
+    theme_bw() + scale_y_log10() +
+    xlab('Shape') + ylab('Scale') +
+    theme(legend.position='right') + ggtitle(paste('From X to ', combi)) + guides(colour = guide_legend(override.aes = list(size=10)))
+  
+  print(point)
+  if (params$save_files){
+  ggsave(paste(here('output/Distance_results/Alberto_reproduction/'), gsub("[[:punct:]]", "", combi), '_parameters.pdf', sep=''))
+    }
+}
+
+six_combinations <- c('B cells','CD4^{+} T cells',
+                      'Macrophages','CD8^{+} T cells','T_{Reg} & T_{Ex}')
+
+for (c in six_combinations){
+  plot_parameters(c)
+}
+
+for (c in six_combinations){
+  plot_parameters(c)
+  grid <- plot_grid(ggplot(data = all_parameters %>%
+    filter(phenotype_to == c) %>%
+    filter(phenotype_from %in% six_combinations)) +
+    geom_boxplot(aes(x=phenotype_from, y = shape)) +
+    theme_bw() + ggtitle(paste('From X to ', c))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)),
+    ggplot(data = all_parameters %>%
+    filter(phenotype_to == c) %>%
+    filter(phenotype_from %in% six_combinations)) +
+    geom_boxplot(aes(x=phenotype_from, y = scale)) +
+    theme_bw() + ggtitle(paste('From X to ', c))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)))
+
+print(grid)
+ggsave(paste(here('output/Distance_results/Alberto_reproduction/'),'boxplots', gsub("[[:punct:]]", "", c), '.pdf', sep=''))
+}
+
+```
+
+Compare the parameters of the six cell types of Alberto with our parameters.
+**Note:** We map the cell types of Alberto to our cell type classification, but both groups are not entirely the same and the cell type groups of Alberto contain more diverse cells.
+
+```{r}
+Alberto_parameters <- read_tsv(here('DATA/global_weib_coeff_oct.tsv')) %>% mutate(type='NABUCCO')
+
+NABUCCO_parameters <- Alberto_parameters %>%
+    separate(phenotype_combo, into=c('phenotype_from','phenotype_to'),sep='_to_', remove = FALSE) %>%
+  mutate(type = 'NABUCCO') %>%
+  mutate(METABRIC_type_from = ifelse(phenotype_from == "PanCK+", 'CK8-18^{hi}CXCL12^{hi}',
+                                     ifelse(phenotype_from=="CD20+", 'B cells',
+                                            ifelse(phenotype_from=='CD3+', 'CD4^{+} T cells',
+                                                   ifelse(phenotype_from=="CD68+", 'Macrophages',
+                                                          ifelse(phenotype_from=="CD8+CD3+",'CD8^{+} T cells',
+                                                                 ifelse(phenotype_from=="CD3+FoxP3+",'T_{Reg} & T_{Ex}', 'negative'))))))) %>%
+  mutate(METABRIC_type_to = ifelse(phenotype_to == "PanCK+", 'CK8-18^{hi}CXCL12^{hi}',
+                                     ifelse(phenotype_to=="CD20+", 'B cells',
+                                            ifelse(phenotype_to=='CD3+', 'CD4^{+} T cells',
+                                                   ifelse(phenotype_to=="CD68+", 'Macrophages',
+                                                          ifelse(phenotype_to=="CD8+CD3+",'CD8^{+} T cells',
+                                                                 ifelse(phenotype_to=="CD3+FoxP3+",'T_{Reg} & T_{Ex}', 'negative'))))))) %>%
+  dplyr::select(c(a,b,METABRIC_type_to, METABRIC_type_from)) %>%
+  rename(shape = a,
+         scale = b,
+         phenotype_from = METABRIC_type_from,
+         phenotype_to = METABRIC_type_to) %>%
+  mutate(type='NABUCCO')
+
+NABUCCO_AND_METABRIC_parameters <- bind_rows(all_parameters %>% dplyr::select(c(phenotype_from, phenotype_to, shape, scale)) %>%
+                                               mutate(type='METABRIC'),
+                                             NABUCCO_parameters) %>% filter(phenotype_to %in% six_combinations) %>% filter(phenotype_from %in% six_combinations)
+
+res <- wilcox.test(NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_from==six_combinations[1] & phenotype_to==six_combinations[1] & type=='METABRIC') %>% pull(shape),
+                   NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_from==six_combinations[1] & phenotype_to==six_combinations[1] & type=='NABUCCO') %>% pull(shape))
+res
+
+
+# https://rdrr.io/cran/ggsignif/man/stat_signif.html
+for (c in six_combinations){
+  group_ordered_shape <- with(NABUCCO_AND_METABRIC_parameters %>% filter(type=='METABRIC') %>% filter(phenotype_to==c),                       # Order boxes by median
+                      reorder(phenotype_from,
+                              shape,
+                              median))
+
+  data_ordered_shape <- NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_to ==c)
+  data_ordered_shape$phenotype_from <- factor(data_ordered_shape$phenotype_from,
+                               levels = levels(group_ordered_shape))
+  
+  medians_shape <- data_ordered_shape %>% group_by(phenotype_from, type) %>% summarise(median = median(shape)) %>% arrange(factor(phenotype_from, levels = unique(group_ordered_shape)))
+  res_shape <- cor.test(medians_shape %>% filter(type=='METABRIC') %>% pull(median),medians_shape %>% filter(type=='NABUCCO') %>% pull(median), method='spearman')
+  
+  group_ordered_scale <- with(NABUCCO_AND_METABRIC_parameters %>% filter(type=='METABRIC') %>% filter(phenotype_to==c),                       # Order boxes by median
+                    reorder(phenotype_from,
+                            scale,
+                            median))
+
+  data_ordered_scale <- NABUCCO_AND_METABRIC_parameters %>% filter(phenotype_to ==c)
+  data_ordered_scale$phenotype_from <- factor(data_ordered_scale$phenotype_from,
+                               levels = levels(group_ordered_scale))
+  
+  medians_scale <- data_ordered_scale %>% group_by(phenotype_from, type) %>% summarise(median = median(scale)) %>% arrange(factor(phenotype_from, levels = unique(group_ordered_scale)))
+  res_scale <- cor.test(medians_scale %>% filter(type=='METABRIC') %>% pull(median),medians_scale %>% filter(type=='NABUCCO') %>% pull(median),method='spearman')  
+  
+  
+  bp <- plot_grid(ggplot(data=data_ordered_shape %>%
+    filter(phenotype_to == c) %>%
+    filter(phenotype_from %in% six_combinations)) +
+                    geom_boxplot(aes(x=phenotype_from, y=shape, fill=type)) +
+    theme_bw() + ggtitle(paste('From X to', c), subtitle= paste('rho:', round(res_shape$estimate[[1]],4)))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + theme(legend.position = "none"),
+    # + stat_compare_means(aes(x=phenotype_from, y=shape, group = type), label = "p.format",size=2)
+
+        ggplot(data=data_ordered_scale%>%
+          filter(phenotype_to == c) %>%
+          filter(phenotype_from %in% six_combinations)) +
+                          geom_boxplot(aes(x=phenotype_from, y=scale, fill=type)) +
+          theme_bw() + ggtitle(paste('From X to ', c), subtitle= paste('rho:', round(res_scale$estimate[[1]],4)))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+        # + stat_compare_means(aes(x=phenotype_from, y=scale, group = type), label = "p.format",size=2)
+    ,rel_widths = c(1.35,2))
+
+  print(bp)
+  if (params$save_files){
+  ggsave(paste(here('output/Distance_results/Alberto_reproduction/'),'compare_boxplots',gsub("[[:punct:]]", "", c),'.pdf', sep=''))
+      }
+}
+
+```
+
+
+## Save all final features
+
+```{r}
+source(here("loadData.R"))
+all_parameters_withoutOutliers <- all_parameters %>% filter(!(unique_sample %in% outliers_original)) %>% filter(!(unique_sample %in% below_threshold))
+saveRDS(all_parameters_withoutOutliers, file = here('scratch/all_parameters_withoutOutliers.rds'))
+
+all_parameters_withoutOutliersAlt <- all_parametersAlt %>% filter(!(unique_sample %in% outliersAlt)) %>% filter(!(unique_sample %in% below_thresholdAlt))
+saveRDS(all_parameters_withoutOutliersAlt, file = here('scratch/all_parameters_withoutOutliers_alternative.rds'))
+
+transform_parameters_to_matrix(all_parameters_withoutOutliers, shapeOutput_path = here('scratch/features/shape_parameters_run1.rds'), scaleOutput_path = here('scratch/features/scale_parameters_run1.rds'))
+
+shape_matrix <- readRDS(here('scratch/features/shape_parameters_run1.rds'))
+sum(!is.na(shape_matrix[,2:ncol(shape_matrix)])) == nrow(all_parameters_withoutOutliers)
+
+transform_parameters_to_matrix(all_parameters_withoutOutliersAlt, shapeOutput_path = here('scratch/features/shape_parameters_run2.rds'), scaleOutput_path = here('scratch/features/scale_parameters_run2.rds'))
+
+shape_matrix <- readRDS(here('scratch/features/shape_parameters_run2.rds'))
+sum(!is.na(shape_matrix[,2:ncol(shape_matrix)])) == nrow(all_parameters_withoutOutliersAlt)
+
+```
+
+
+
